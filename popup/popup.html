@@ -1,0 +1,48 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>ClientSync</title>
+  <link rel="stylesheet" href="popup.css" />
+</head>
+<body>
+  <div class="popup-container">
+    <div class="popup-header">
+      <div class="logo">
+        <span class="logo-icon">🛡️</span>
+        <span class="logo-text">ClientSync</span>
+      </div>
+    </div>
+
+    <div class="status-card">
+      <div class="status-row">
+        <span class="status-label">Status</span>
+        <span class="status-badge active">Active</span>
+      </div>
+      <div class="status-row">
+        <span class="status-label">Customers tracked</span>
+        <span id="customerCount" class="status-value">—</span>
+      </div>
+      <div class="status-row">
+        <span class="status-label">Last synced</span>
+        <span id="lastSynced" class="status-value">—</span>
+      </div>
+    </div>
+
+    <div class="debug-card" id="debugCard" style="display:none">
+      <div class="debug-label">Active ticket</div>
+      <div id="debugInfo" class="debug-value"></div>
+    </div>
+
+    <div class="actions">
+      <button id="refreshBtn" class="btn-secondary">↻ Refresh list</button>
+      <button id="settingsBtn" class="btn-primary">⚙ Manage customers</button>
+    </div>
+
+    <div id="refreshMsg" class="refresh-msg hidden"></div>
+  </div>
+
+  <script src="popup.js"></script>
+</body>
+</html>
