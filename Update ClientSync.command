@@ -8,7 +8,7 @@ DEST="$HOME/clientsync-extension"
 echo "Updating ClientSync..."
 rm -rf "$DEST"
 mkdir -p "$DEST"
-curl -fSL "$URL" -o /tmp/cs.zip
+curl -fsSL "$URL" -o /tmp/cs.zip
 unzip -oq /tmp/cs.zip -d "$DEST"
 rm -f /tmp/cs.zip
 

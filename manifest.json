@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
   "name": "ClientSync - Client Mismatch Prevention",
-  "version": "1.1.0",
+  "version": "1.2.0",
   "description": "Prevent submitting support tickets to the wrong client by detecting mismatches in Worknotes and Subject fields.",
   "permissions": [
     "storage",

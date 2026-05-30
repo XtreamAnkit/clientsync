@@ -16,12 +16,18 @@
     </div>
 
     <div id="updateBanner" class="update-banner" style="display:none">
-      <span class="update-icon">⬆️</span>
-      <div class="update-text">
-        <strong>Update available</strong>
-        <span id="updateVersion" class="update-version"></span>
+      <div class="update-top">
+        <span class="update-icon">⬆️</span>
+        <div class="update-text">
+          <strong>Update available</strong>
+          <span id="updateVersion" class="update-version"></span>
+        </div>
       </div>
-      <a id="updateLink" href="#" target="_blank" class="update-link">Get it</a>
+      <div class="update-cmd-row">
+        <code id="updateCmd" class="update-cmd"></code>
+        <button id="copyCmdBtn" class="update-link">Copy</button>
+      </div>
+      <div class="update-hint">Paste in Terminal, then reload at chrome://extensions and refresh Zendesk.</div>
     </div>
 
     <div class="status-card">

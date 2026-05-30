@@ -1,3 +1,5 @@
+const UPDATE_COMMAND = 'rm -rf ~/clientsync-extension && mkdir -p ~/clientsync-extension && curl -fsSL "https://github.com/XtreamAnkit/clientsync/releases/latest/download/clientsync.zip" -o /tmp/cs.zip && unzip -oq /tmp/cs.zip -d ~/clientsync-extension && rm /tmp/cs.zip && echo "ClientSync updated. Reload at chrome://extensions and refresh Zendesk."';
+
 function formatRelativeTime(timestamp) {
   if (!timestamp) return 'Never';
   const diff = Date.now() - timestamp;
@@ -26,8 +28,7 @@ function loadStatus() {
     if (response.updateAvailable) {
       document.getElementById('updateVersion').textContent =
         `v${response.latestVersion} (you have v${response.currentVersion})`;
-      const link = document.getElementById('updateLink');
-      if (response.releaseUrl) link.href = response.releaseUrl;
+      document.getElementById('updateCmd').textContent = UPDATE_COMMAND;
       banner.style.display = '';
     } else {
       banner.style.display = 'none';
@@ -37,6 +38,14 @@ function loadStatus() {
 
 document.getElementById('settingsBtn').addEventListener('click', () => {
   chrome.runtime.openOptionsPage();
+});
+
+document.getElementById('copyCmdBtn').addEventListener('click', () => {
+  const btn = document.getElementById('copyCmdBtn');
+  navigator.clipboard.writeText(UPDATE_COMMAND).then(() => {
+    btn.textContent = 'Copied!';
+    setTimeout(() => { btn.textContent = 'Copy'; }, 2000);
+  });
 });
 
 document.getElementById('refreshBtn').addEventListener('click', () => {

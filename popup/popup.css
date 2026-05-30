@@ -41,7 +41,7 @@ body {
 
 .update-banner {
   display: flex;
-  align-items: center;
+  flex-direction: column;
   gap: 8px;
   margin: 12px 12px 0;
   padding: 10px 12px;
@@ -49,6 +49,37 @@ body {
   background: #eef6ff;
   border: 1px solid #bcdcff;
   font-size: 12px;
+}
+
+.update-top {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.update-cmd-row {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.update-cmd {
+  flex: 1;
+  background: #0b2238;
+  color: #d6e6f5;
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 10px;
+  padding: 6px 8px;
+  border-radius: 5px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.update-hint {
+  color: #5a7184;
+  font-size: 10px;
+  line-height: 1.3;
 }
 
 .update-icon {
