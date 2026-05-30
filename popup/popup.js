@@ -21,6 +21,17 @@ function loadStatus() {
     if (chrome.runtime.lastError || !response) return;
     document.getElementById('customerCount').textContent = response.customerCount;
     document.getElementById('lastSynced').textContent = formatRelativeTime(response.lastSynced);
+
+    const banner = document.getElementById('updateBanner');
+    if (response.updateAvailable) {
+      document.getElementById('updateVersion').textContent =
+        `v${response.latestVersion} (you have v${response.currentVersion})`;
+      const link = document.getElementById('updateLink');
+      if (response.releaseUrl) link.href = response.releaseUrl;
+      banner.style.display = '';
+    } else {
+      banner.style.display = 'none';
+    }
   });
 }
 
@@ -59,5 +70,9 @@ function loadDebugInfo() {
 }
 
 loadStatus();
+// Re-check on open so the banner reflects the latest release without waiting for the hourly alarm.
+chrome.runtime.sendMessage({ action: 'checkForUpdate' }, () => {
+  if (!chrome.runtime.lastError) loadStatus();
+});
 loadDebugInfo();
 setInterval(loadDebugInfo, 10000);
