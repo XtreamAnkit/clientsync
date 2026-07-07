@@ -15,25 +15,29 @@
       </div>
     </div>
 
-    <div id="updateBanner" class="update-banner" style="display:none">
+    <div id="updateBanner" class="update-banner">
       <div class="update-top">
         <span class="update-icon">⬆️</span>
         <div class="update-text">
-          <strong>Update available</strong>
+          <strong id="updateTitle">Up to date</strong>
           <span id="updateVersion" class="update-version"></span>
         </div>
+        <button id="copyCmdBtn" class="update-link" disabled>Up to date</button>
       </div>
-      <div class="update-cmd-row">
+      <div id="updateCmdRow" class="update-cmd-row" style="display:none">
         <code id="updateCmd" class="update-cmd"></code>
-        <button id="copyCmdBtn" class="update-link">Copy</button>
       </div>
-      <div class="update-hint">Paste in Terminal, then reload at chrome://extensions and refresh Zendesk.</div>
+      <div id="updateHint" class="update-hint" style="display:none">Paste in Terminal, then reload at chrome://extensions and refresh Zendesk.</div>
     </div>
 
     <div class="status-card">
       <div class="status-row">
         <span class="status-label">Status</span>
         <span class="status-badge active">Active</span>
+      </div>
+      <div class="status-row">
+        <span class="status-label">Version</span>
+        <span id="currentVersion" class="status-value">—</span>
       </div>
       <div class="status-row">
         <span class="status-label">Customers tracked</span>

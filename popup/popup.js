@@ -23,15 +23,34 @@ function loadStatus() {
     if (chrome.runtime.lastError || !response) return;
     document.getElementById('customerCount').textContent = response.customerCount;
     document.getElementById('lastSynced').textContent = formatRelativeTime(response.lastSynced);
+    if (response.currentVersion) {
+      document.getElementById('currentVersion').textContent = `v${response.currentVersion}`;
+    }
 
-    const banner = document.getElementById('updateBanner');
+    const banner  = document.getElementById('updateBanner');
+    const title   = document.getElementById('updateTitle');
+    const version = document.getElementById('updateVersion');
+    const btn     = document.getElementById('copyCmdBtn');
+    const cmdRow  = document.getElementById('updateCmdRow');
+    const hint    = document.getElementById('updateHint');
+
     if (response.updateAvailable) {
-      document.getElementById('updateVersion').textContent =
-        `v${response.latestVersion} (you have v${response.currentVersion})`;
+      banner.classList.add('has-update');
+      title.textContent = 'Update available';
+      version.textContent = `v${response.latestVersion} (you have v${response.currentVersion})`;
+      btn.textContent = 'Copy';
+      btn.disabled = false;
       document.getElementById('updateCmd').textContent = UPDATE_COMMAND;
-      banner.style.display = '';
+      cmdRow.style.display = '';
+      hint.style.display = '';
     } else {
-      banner.style.display = 'none';
+      banner.classList.remove('has-update');
+      title.textContent = 'Up to date';
+      version.textContent = response.currentVersion ? `v${response.currentVersion}` : '';
+      btn.textContent = 'Up to date';
+      btn.disabled = true;
+      cmdRow.style.display = 'none';
+      hint.style.display = 'none';
     }
   });
 }
