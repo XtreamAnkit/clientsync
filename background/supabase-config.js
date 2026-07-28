@@ -1,10 +1,23 @@
-const EDGE_URL     = 'https://suqpzsaytsrtokibqxbv.supabase.co/functions/v1/customers';
+const EDGE_URL      = 'https://suqpzsaytsrtokibqxbv.supabase.co/functions/v1/customers';
+const TELEMETRY_URL = 'https://suqpzsaytsrtokibqxbv.supabase.co/functions/v1/telemetry';
 const CLIENT_SECRET = 'cs-snowbit-k9x2m7pq4r';
 
 const HEADERS = {
   'x-client-secret': CLIENT_SECRET,
   'Content-Type': 'application/json'
 };
+
+// Fire-and-forget telemetry POST. Never throws — telemetry must never disrupt
+// the extension's core behaviour, so failures are swallowed silently.
+export async function sendTelemetry(payload) {
+  try {
+    await fetch(TELEMETRY_URL, {
+      method: 'POST',
+      headers: HEADERS,
+      body: JSON.stringify(payload)
+    });
+  } catch (_) { /* offline / backend down — ignore */ }
+}
 
 async function handleResponse(res) {
   if (!res.ok) {

@@ -1,4 +1,21 @@
-import { fetchActiveCustomerNames } from './supabase-config.js';
+import { fetchActiveCustomerNames, sendTelemetry } from './supabase-config.js';
+
+// ─── Telemetry ──────────────────────────────────────────────────────────────
+
+// Send an install/heartbeat row using the cached Zendesk identity + version.
+async function sendHeartbeat() {
+  const { agentEmail, agentName } = await chrome.storage.local.get(['agentEmail', 'agentName']);
+  // Identity only comes from Zendesk; skip until we have it so we never create
+  // an "unknown" install row.
+  if (!agentEmail) return;
+  await sendTelemetry({
+    type: 'heartbeat',
+    agent_email: agentEmail,
+    agent_name:  agentName || null,
+    version:     chrome.runtime.getManifest().version,
+    browser:     'Chrome'
+  });
+}
 
 const ALARM_NAME = 'refreshCustomerList';
 const REFRESH_INTERVAL_MINUTES = 5;
@@ -70,6 +87,7 @@ chrome.runtime.onInstalled.addListener(async () => {
   chrome.alarms.create(ALARM_NAME, { periodInMinutes: REFRESH_INTERVAL_MINUTES });
   chrome.alarms.create(UPDATE_ALARM_NAME, { periodInMinutes: UPDATE_INTERVAL_MINUTES });
   await checkForUpdate();
+  await sendHeartbeat();
   await reloadZendeskTabs();
 });
 
@@ -77,6 +95,7 @@ chrome.runtime.onInstalled.addListener(async () => {
 chrome.runtime.onStartup.addListener(async () => {
   await refreshCustomerList();
   await checkForUpdate();
+  await sendHeartbeat();
 });
 
 // Periodic refresh via alarm
@@ -85,6 +104,7 @@ chrome.alarms.onAlarm.addListener(async (alarm) => {
     await refreshCustomerList();
   } else if (alarm.name === UPDATE_ALARM_NAME) {
     await checkForUpdate();
+    await sendHeartbeat();
   }
 });
 
@@ -129,5 +149,40 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
   if (message.action === 'checkForUpdate') {
     checkForUpdate().then(available => sendResponse({ available }));
     return true;
+  }
+
+  // Content script reports the logged-in Zendesk agent's identity. Cache it and
+  // send a heartbeat so the install row picks up the real name/email right away.
+  if (message.action === 'setIdentity') {
+    (async () => {
+      await chrome.storage.local.set({
+        agentEmail: (message.email || '').toLowerCase() || null,
+        agentName:  message.name || null
+      });
+      await sendHeartbeat();
+      sendResponse({ ok: true });
+    })();
+    return true; // keep the worker alive until the async work finishes
+  }
+
+  // Content script reports a wrong-client detection. Enrich with identity +
+  // version and forward to the telemetry backend.
+  if (message.action === 'logDetection') {
+    (async () => {
+      const id = await chrome.storage.local.get(['agentEmail', 'agentName']);
+      await sendTelemetry({
+        type: 'detection',
+        agent_email:       id.agentEmail || 'unknown',
+        agent_name:        id.agentName || null,
+        ticket_id:         message.ticketId || null,
+        ticket_org:        message.ticketOrg || null,
+        detected_term:     message.detectedTerm || null,
+        associated_client: message.associatedClient || null,
+        in_hyperlink:      !!message.inHyperlink,
+        version:           chrome.runtime.getManifest().version
+      });
+      sendResponse({ ok: true });
+    })();
+    return true; // keep the worker alive until the fetch completes
   }
 });

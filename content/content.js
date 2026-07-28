@@ -17,6 +17,19 @@
     }
   });
 
+  // ─── Identity ───────────────────────────────────────────────────────────────
+  // Fetch the logged-in Zendesk agent (same-origin, uses the existing session)
+  // and hand it to the background worker for telemetry. Best-effort, runs once.
+  (async function reportIdentity() {
+    try {
+      const res = await fetch('/api/v2/users/me.json', { credentials: 'include' });
+      if (!res.ok) return;
+      const { user } = await res.json();
+      if (!user?.email) return;
+      chrome.runtime.sendMessage({ action: 'setIdentity', email: user.email, name: user.name }).catch(() => {});
+    } catch (_) { /* not authenticated / API blocked — telemetry falls back to "unknown" */ }
+  })();
+
   // ─── Selectors ────────────────────────────────────────────────────────────────
 
   const selOrg     = '[data-test-id="tabs-nav-item-organizations"]';
@@ -120,6 +133,29 @@
     )];
     const highlightTerms  = [...new Set(matched.flatMap(c => c.hits.map(h => h.term)))];
     blockUI(org, displayItems, highlightTerms);
+    logDetections(org, matched);
+  }
+
+  // Report each distinct detection once (per ticket + client + term) so a single
+  // mismatch isn't logged repeatedly as the user keeps typing.
+  const loggedDetections = new Set();
+  function logDetections(org, matched) {
+    const ticketId = getActiveTicket();
+    matched.forEach(c => c.hits.forEach(h => {
+      const sig = `${ticketId}|${c.name}|${h.term}`;
+      if (loggedDetections.has(sig)) return;
+      loggedDetections.add(sig);
+      try {
+        chrome.runtime.sendMessage({
+          action: 'logDetection',
+          ticketId,
+          ticketOrg: org,
+          detectedTerm: h.term,
+          associatedClient: c.name,
+          inHyperlink: h.inHyperlink
+        }).catch(() => {});
+      } catch (_) { /* extension reloaded */ }
+    }));
   }
 
   // ─── Click interceptor (capture phase — survives React re-renders) ───────────
