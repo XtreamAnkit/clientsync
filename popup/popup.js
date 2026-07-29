@@ -1,5 +1,11 @@
 const UPDATE_COMMAND = 'rm -rf ~/clientsync-extension && mkdir -p ~/clientsync-extension && curl -fsSL "https://github.com/XtreamAnkit/clientsync/releases/latest/download/clientsync.zip" -o /tmp/cs.zip && unzip -oq /tmp/cs.zip -d ~/clientsync-extension && rm /tmp/cs.zip && echo "ClientSync updated. Reload at chrome://extensions and refresh Zendesk."';
 
+function cmpVer(a, b) {
+  const x = String(a || '0').split('.').map(Number), y = String(b || '0').split('.').map(Number);
+  for (let i = 0; i < 3; i++) { if ((x[i]||0) > (y[i]||0)) return 1; if ((x[i]||0) < (y[i]||0)) return -1; }
+  return 0;
+}
+
 function formatRelativeTime(timestamp) {
   if (!timestamp) return 'Never';
   const diff = Date.now() - timestamp;
@@ -27,6 +33,25 @@ function loadStatus() {
       document.getElementById('currentVersion').textContent = `v${response.currentVersion}`;
     }
 
+    // Admin announcement banner
+    const ann = document.getElementById('announceBanner');
+    if (response.announcement) {
+      document.getElementById('announceText').textContent = response.announcement;
+      ann.style.display = '';
+    } else { ann.style.display = 'none'; }
+
+    // Status badge reflects the admin's enforcement config
+    const sb = document.getElementById('statusBadge');
+    if (sb) {
+      if (response.enabled === false) { sb.textContent = 'Disabled'; sb.className = 'status-badge inactive'; }
+      else if (response.enforcement === 'warn') { sb.textContent = 'Warn-only'; sb.className = 'status-badge'; }
+      else if (response.enforcement === 'log')  { sb.textContent = 'Logging';   sb.className = 'status-badge'; }
+      else { sb.textContent = 'Active'; sb.className = 'status-badge active'; }
+    }
+
+    // Admin-mandated minimum version → force the update banner as "required"
+    const belowMin = response.minVersion && cmpVer(response.currentVersion, response.minVersion) < 0;
+
     const banner  = document.getElementById('updateBanner');
     const title   = document.getElementById('updateTitle');
     const version = document.getElementById('updateVersion');
@@ -34,10 +59,13 @@ function loadStatus() {
     const cmdRow  = document.getElementById('updateCmdRow');
     const hint    = document.getElementById('updateHint');
 
-    if (response.updateAvailable) {
+    if (response.updateAvailable || belowMin) {
       banner.classList.add('has-update');
-      title.textContent = 'Update available';
-      version.textContent = `v${response.latestVersion} (you have v${response.currentVersion})`;
+      title.textContent = belowMin ? '⚠ Update required' : 'Update available';
+      const target = response.latestVersion || response.minVersion;
+      version.textContent = belowMin
+        ? `admin requires v${response.minVersion}+ (you have v${response.currentVersion})`
+        : `v${target} (you have v${response.currentVersion})`;
       btn.textContent = 'Copy';
       btn.disabled = false;
       document.getElementById('updateCmd').textContent = UPDATE_COMMAND;

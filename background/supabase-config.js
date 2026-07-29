@@ -7,6 +7,18 @@ const HEADERS = {
   'Content-Type': 'application/json'
 };
 
+// Fetch the remote-control config plus this agent's override (if any).
+// Returns { config, override } or null on failure so the extension falls back
+// to its cached (or default) behaviour.
+export async function fetchConfig(agentEmail) {
+  try {
+    const qs = agentEmail ? `?resource=config&email=${encodeURIComponent(agentEmail)}` : '?resource=config';
+    const res = await fetch(`${TELEMETRY_URL}${qs}`, { headers: HEADERS });
+    if (!res.ok) return null;
+    return await res.json(); // { config, override }
+  } catch (_) { return null; }
+}
+
 // Fire-and-forget telemetry POST. Never throws — telemetry must never disrupt
 // the extension's core behaviour, so failures are swallowed silently.
 export async function sendTelemetry(payload) {

@@ -6,16 +6,35 @@
 
   let customers = [];
 
-  chrome.storage.local.get(['customerList'], r => {
+  // Remote-control config (set by admin). Defaults keep full protection on if the
+  // config hasn't loaded yet or the backend is unreachable.
+  const DEFAULT_CONFIG = {
+    enabled: true, enforcement: 'block', scan_hyperlinks: true,
+    scan_subject: true, highlight: true, message_title: null, message_body: null
+  };
+  let config = { ...DEFAULT_CONFIG };
+
+  chrome.storage.local.get(['customerList', 'csConfig'], r => {
     customers = r.customerList || [];
+    if (r.csConfig) config = { ...DEFAULT_CONFIG, ...r.csConfig };
   });
 
   chrome.storage.onChanged.addListener((changes, area) => {
-    if (area === 'local' && changes.customerList) {
-      customers = changes.customerList.newValue || [];
-      validate();
-    }
+    if (area !== 'local') return;
+    if (changes.customerList) customers = changes.customerList.newValue || [];
+    if (changes.csConfig)     config = { ...DEFAULT_CONFIG, ...(changes.csConfig.newValue || {}) };
+    if (changes.customerList || changes.csConfig) validate();
   });
+
+  // Ask the background worker for a fresh config pull. Called on load, tab focus,
+  // and ticket switches so admin changes (kill switch, mode, messages) take effect
+  // within seconds of the agent interacting — without anyone reloading anything.
+  function pokeConfig() {
+    try { chrome.runtime.sendMessage({ action: 'refreshConfigNow' }).catch(() => {}); } catch (_) {}
+  }
+  document.addEventListener('visibilitychange', () => { if (document.visibilityState === 'visible') pokeConfig(); });
+  window.addEventListener('focus', pokeConfig);
+  pokeConfig();
 
   // ─── Identity ───────────────────────────────────────────────────────────────
   // Fetch the logged-in Zendesk agent (same-origin, uses the existing session)
@@ -69,16 +88,18 @@
   // ─── Validation ───────────────────────────────────────────────────────────────
 
   function validate() {
+    // Global kill switch — admin disabled the extension.
+    if (config.enabled === false) { clearUI(); return; }
     if (!/\/tickets\/\d+/.test(location.href)) { clearUI(); return; }
 
     const org         = getOrg();
     const notesEl     = getNotes();
-    const noteHrefs   = notesEl
+    const noteHrefs   = (notesEl && config.scan_hyperlinks !== false)
       ? [...notesEl.querySelectorAll('a[href]')].map(a => a.getAttribute('href') || '')
       : [];
     const notesVisible = (notesEl?.textContent || '').toLowerCase();
     const hrefText     = noteHrefs.join(' ').toLowerCase();
-    const subjectText  = getSubject().toLowerCase();
+    const subjectText  = config.scan_subject === false ? '' : getSubject().toLowerCase();
 
     if (!org || !customers.length) return;
 
@@ -132,9 +153,22 @@
       )
     )];
     const highlightTerms  = [...new Set(matched.flatMap(c => c.hits.map(h => h.term)))];
-    blockUI(org, displayItems, highlightTerms);
+
+    // Context for the "Report false positive" button.
+    lastDetection = {
+      ticketId: getActiveTicket(),
+      org,
+      items: matched.flatMap(c => c.hits.map(h => ({ term: h.term, client: c.name })))
+    };
+
+    // Enforcement mode: 'log' = silently record, no UI; 'warn' = show modal but
+    // don't block submit; 'block' = show modal and block submit (default).
     logDetections(org, matched);
+    if (config.enforcement === 'log') { clearUI(); return; }
+    blockUI(org, displayItems, highlightTerms, config.enforcement !== 'warn');
   }
+
+  let lastDetection = null;
 
   // Report each distinct detection once (per ticket + client + term) so a single
   // mismatch isn't logged repeatedly as the user keeps typing.
@@ -202,23 +236,28 @@
     if (CSS.highlights) CSS.highlights.delete('cs-match');
   }
 
-  function blockUI(org, found, highlightTerms) {
-    blocked = true;
-    document.body.classList.add('cs-blocked');
+  function blockUI(org, found, highlightTerms, doBlock) {
+    blocked = !!doBlock; // 'warn' mode shows the modal without blocking Submit
+    document.body.classList.toggle('cs-blocked', blocked);
     const notesEl = getNotes();
-    if (notesEl && highlightTerms?.length) highlightMatches(notesEl, highlightTerms);
+    if (notesEl && highlightTerms?.length && config.highlight !== false) highlightMatches(notesEl, highlightTerms);
+    else clearHighlights();
     let el = document.querySelector('#client-mismatch-warning');
     if (!el) {
       el = document.createElement('div');
       el.id = 'client-mismatch-warning';
       document.body.appendChild(el);
     }
+    const title = config.message_title || '⚠️ Hold up! Wrong client detected!';
+    const body  = config.message_body  || 'Seems like the wrong client is selected. Please verify before submitting.';
+    const hint  = doBlock ? 'Fix the client or update your notes to continue.'
+                          : 'This is a warning — please double-check before submitting.';
     el.innerHTML = `
       <div class="warning-overlay">
         <div class="warning-modal">
-          <div class="warning-header"><h2>⚠️ Hold up! Wrong client detected!</h2></div>
+          <div class="warning-header"><h2>${esc(title)}</h2></div>
           <div class="warning-content">
-            <p>Seems like the wrong client is selected. Please verify before submitting.</p>
+            <p>${esc(body)}</p>
             <div class="client-info">
               <div class="client-row">
                 <span class="label">🎫 Ticket for:</span>
@@ -230,9 +269,26 @@
               </div>
             </div>
           </div>
-          <div class="warning-footer"><p class="hint">Fix the client or update your notes to continue.</p></div>
+          <div class="warning-footer">
+            <p class="hint">${esc(hint)}</p>
+            <button id="cs-report-fp" class="cs-fp-btn">🚩 Report false positive</button>
+          </div>
         </div>
       </div>`;
+
+    const fpBtn = el.querySelector('#cs-report-fp');
+    if (fpBtn) fpBtn.addEventListener('click', () => {
+      fpBtn.disabled = true;
+      fpBtn.textContent = 'Reported ✓ — thanks';
+      try {
+        chrome.runtime.sendMessage({
+          action: 'reportFalsePositive',
+          ticketId: lastDetection?.ticketId || getActiveTicket(),
+          ticketOrg: org,
+          items: lastDetection?.items || []
+        }).catch(() => {});
+      } catch (_) {}
+    });
   }
 
   function clearUI() {
@@ -298,6 +354,7 @@
       document.querySelectorAll('[data-cs-attached]').forEach(el => el.removeAttribute('data-cs-attached'));
     }
     attach();
+    pokeConfig();
     try { chrome.storage.local.set({ debugTicket: lastTicketId, debugOrg: getOrg() }).catch(() => {}); } catch (_) {}
   }
 

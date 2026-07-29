@@ -128,3 +128,18 @@ body.cs-blocked [data-test-id="submit_button-menu-button"] {
   color: #999;
   font-size: 11px;
 }
+
+.cs-fp-btn {
+  margin-top: 10px;
+  font: inherit;
+  font-size: 12px;
+  color: #b45309;
+  background: #fff;
+  border: 1px solid #e5d5b0;
+  border-radius: 6px;
+  padding: 5px 12px;
+  cursor: pointer;
+}
+
+.cs-fp-btn:hover { background: #fff8ec; }
+.cs-fp-btn:disabled { color: #16a34a; border-color: #bbf7d0; background: #f0fdf4; cursor: default; }

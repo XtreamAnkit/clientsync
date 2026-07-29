@@ -1,14 +1,16 @@
 {
   "manifest_version": 3,
   "name": "ClientSync - Client Mismatch Prevention",
-  "version": "1.4.0",
+  "version": "1.5.0",
   "description": "Prevent submitting support tickets to the wrong client by detecting mismatches in Worknotes and Subject fields.",
   "permissions": [
     "storage",
     "activeTab",
     "scripting",
     "alarms",
-    "tabs"
+    "tabs",
+    "notifications",
+    "offscreen"
   ],
   "host_permissions": [
     "https://snowbit.zendesk.com/*",

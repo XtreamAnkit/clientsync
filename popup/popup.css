@@ -39,6 +39,20 @@ body {
   letter-spacing: -0.01em;
 }
 
+.announce-banner {
+  display: flex;
+  gap: 8px;
+  align-items: flex-start;
+  margin: 12px 12px 0;
+  padding: 10px 12px;
+  border-radius: 8px;
+  background: #fef3c7;
+  border: 1px solid #fcd34d;
+  color: #78350f;
+  font-size: 12.5px;
+  line-height: 1.35;
+}
+
 .update-banner {
   display: flex;
   flex-direction: column;
