@@ -82,7 +82,7 @@ async function refreshConfig() {
   const ov = res.override;
   if (ov) {
     for (const k of ['enabled','enforcement','scan_hyperlinks','scan_subject','highlight',
-                     'min_version','message_title','message_body']) {
+                     'min_version','message_title','message_body','ignore_orgs']) {
       if (ov[k] !== null && ov[k] !== undefined) merged[k] = ov[k];
     }
   }

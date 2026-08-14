@@ -10,7 +10,8 @@
   // config hasn't loaded yet or the backend is unreachable.
   const DEFAULT_CONFIG = {
     enabled: true, enforcement: 'block', scan_hyperlinks: true,
-    scan_subject: true, highlight: true, message_title: null, message_body: null
+    scan_subject: true, highlight: true, message_title: null, message_body: null,
+    ignore_orgs: null
   };
   let config = { ...DEFAULT_CONFIG };
 
@@ -54,8 +55,6 @@
   const selOrg     = '[data-test-id="tabs-nav-item-organizations"]';
   const selNotes   = '[data-test-id="omnicomposer-rich-text-ckeditor"]';
   const selSubject = '[data-test-id="omni-header-subject"]';
-  const selSubmit  = '[data-test-id="submit_button-button"]';
-  const selDrop    = '[data-test-id="submit_button-menu-button"]';
 
   // Scope all panel lookups to the active ticket's entity ID.
   // Zendesk keeps all open tickets' panels in the DOM simultaneously — they share the same
@@ -83,7 +82,6 @@
   const getOrg     = () => getActiveOrgEl()?.textContent?.trim() || null;
   const getNotes   = () => inPanel(selNotes)                      || null;
   const getSubject = () => inPanel(selSubject)?.value?.trim()     || '';
-  const getBtns    = () => [selSubmit, selDrop].map(s => document.querySelector(s)).filter(Boolean);
 
   // ─── Validation ───────────────────────────────────────────────────────────────
 
@@ -101,7 +99,12 @@
     const hrefText     = noteHrefs.join(' ').toLowerCase();
     const subjectText  = config.scan_subject === false ? '' : getSubject().toLowerCase();
 
-    if (!org || !customers.length) return;
+    if (!org || !customers.length) { clearUI(); return; }
+
+    // Exempt orgs (e.g. your own internal org) — never flag on their tickets.
+    const ignoreOrgs = (config.ignore_orgs || '')
+      .split(/[\n,]/).map(s => s.trim().toLowerCase()).filter(Boolean);
+    if (ignoreOrgs.includes(org.toLowerCase())) { clearUI(); return; }
 
     const inText    = (term, text) => new RegExp(`\\b${term.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}\\b`, 'i').test(text);
     const orgLower  = org.toLowerCase();
@@ -352,10 +355,12 @@
       clearUI();
       detachObservers();
       document.querySelectorAll('[data-cs-attached]').forEach(el => el.removeAttribute('data-cs-attached'));
+      // Only on an actual ticket switch — NOT on every 500ms poll — so we don't
+      // hammer the backend with config pulls or storage writes.
+      pokeConfig();
+      try { chrome.storage.local.set({ debugTicket: lastTicketId, debugOrg: getOrg() }).catch(() => {}); } catch (_) {}
     }
     attach();
-    pokeConfig();
-    try { chrome.storage.local.set({ debugTicket: lastTicketId, debugOrg: getOrg() }).catch(() => {}); } catch (_) {}
   }
 
   // Trigger immediately on tab click — don't wait for the next poll

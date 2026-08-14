@@ -200,9 +200,19 @@ body {
   border-radius: 20px;
 }
 
+.status-badge {
+  background: #fff3e0;
+  color: #b45309;
+}
+
 .status-badge.active {
   background: #e8f5e9;
   color: #2e7d32;
+}
+
+.status-badge.inactive {
+  background: #fdecea;
+  color: #c62828;
 }
 
 .debug-card {
