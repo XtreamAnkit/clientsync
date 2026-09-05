@@ -39,10 +39,16 @@ async function handleResponse(res) {
   return res.status === 204 ? null : res.json();
 }
 
-// Fetch only active customers (name + aliases) — used by background for caching
-export async function fetchActiveCustomerNames() {
-  const data = await handleResponse(await fetch(EDGE_URL, { headers: HEADERS }));
-  return data.map(row => ({ name: row.name, aliases: row.aliases || [] }));
+// Fetch ALL customers (name + aliases + active flag) — used by background for
+// caching. Names are always watched; the active flag only controls whether the
+// customer's OWN tickets are scanned (inactive = that org's tickets are exempt).
+export async function fetchCustomers() {
+  const data = await handleResponse(await fetch(`${EDGE_URL}?all=true`, { headers: HEADERS }));
+  return data.map(row => ({
+    name: row.name,
+    aliases: row.aliases || [],
+    is_active: row.is_active !== false
+  }));
 }
 
 // Fetch all customers with full details — used by settings page

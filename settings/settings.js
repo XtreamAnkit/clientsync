@@ -299,6 +299,25 @@ function closeModal(id) {
   document.getElementById(id).classList.add('hidden');
 }
 
+document.getElementById('zendeskSyncBtn').addEventListener('click', () => {
+  const btn = document.getElementById('zendeskSyncBtn');
+  const original = btn.innerHTML;
+  btn.disabled = true;
+  btn.textContent = 'Syncing… (keep a Zendesk tab open)';
+  chrome.runtime.sendMessage({ action: 'syncFromZendesk' }, async (res) => {
+    btn.disabled = false;
+    btn.innerHTML = original;
+    if (chrome.runtime.lastError || !res) { showToast('Sync failed — is the extension active?', 'error'); return; }
+    if (res.error === 'no_tab')            { showToast('Open a logged-in Zendesk tab first, then try again.', 'error'); return; }
+    if (res.error === 'no_content_script') { showToast('Refresh your Zendesk tab, then try again.', 'error'); return; }
+    if (res.error)                         { showToast(`Sync failed: ${res.error}`, 'error'); return; }
+    showToast(res.added > 0
+      ? `Added ${res.added} new client(s) as inactive from ${res.scanned} active org(s) — review and activate.`
+      : `No new clients — all ${res.scanned} active orgs already exist.`, 'success');
+    await loadCustomers();
+  });
+});
+
 document.getElementById('addCustomerBtn').addEventListener('click', openAddModal);
 document.getElementById('closeModalBtn').addEventListener('click', () => closeModal('customerModal'));
 document.getElementById('cancelBtn').addEventListener('click', () => closeModal('customerModal'));

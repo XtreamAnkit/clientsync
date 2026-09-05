@@ -1,4 +1,40 @@
-import { fetchActiveCustomerNames, sendTelemetry, fetchConfig } from './supabase-config.js';
+import { fetchCustomers, sendTelemetry, fetchConfig,
+         fetchAllCustomers, addCustomer, toggleCustomerActive } from './supabase-config.js';
+
+// Pull active org names from a logged-in Zendesk tab and APPEND any that aren't
+// already in the client list. Newly added clients are set INACTIVE for review;
+// no aliases are added. Never replaces or edits existing clients.
+async function syncFromZendesk() {
+  const tabs = await chrome.tabs.query({ url: '*://snowbit.zendesk.com/*' });
+  if (!tabs.length) return { error: 'no_tab' };
+
+  let res;
+  try {
+    res = await chrome.tabs.sendMessage(tabs[0].id, { action: 'fetchZendeskOrgs' });
+  } catch (_) { return { error: 'no_content_script' }; }
+  if (!res || res.error) return { error: res?.error || 'fetch_failed' };
+  const orgs = res.orgs || [];
+  if (!orgs.length) return { error: 'no_orgs' };
+
+  const existing = await fetchAllCustomers();
+  const have = new Set(existing.map(c => c.name.trim().toLowerCase()));
+  const toAdd = orgs.filter(o => o.name && !have.has(o.name.trim().toLowerCase()));
+
+  for (const o of toAdd) {
+    try { await addCustomer(o.name); } catch (_) {}
+  }
+  // Re-fetch to resolve new ids, then mark the just-added ones inactive.
+  const after = await fetchAllCustomers();
+  const idByName = {};
+  after.forEach(c => { idByName[c.name.trim().toLowerCase()] = c.id; });
+  for (const o of toAdd) {
+    const id = idByName[o.name.trim().toLowerCase()];
+    if (id) { try { await toggleCustomerActive(id, false); } catch (_) {} }
+  }
+
+  await refreshCustomerList();
+  return { added: toAdd.length, scanned: orgs.length };
+}
 
 // ─── Toolbar badge + desktop notifications ───────────────────────────────────
 // Reflect "update needed" / "announcement" on the icon itself, and fire a
@@ -153,7 +189,7 @@ async function checkForUpdate() {
 
 async function refreshCustomerList() {
   try {
-    const customerNames = await fetchActiveCustomerNames();
+    const customerNames = await fetchCustomers();
     await chrome.storage.local.set({
       customerList: customerNames,
       lastSynced: Date.now()
@@ -202,6 +238,7 @@ chrome.alarms.onAlarm.addListener(async (alarm) => {
     await refreshCustomerList();
   } else if (alarm.name === CONFIG_ALARM_NAME) {
     await refreshConfig();
+    await refreshCustomerList();
   } else if (alarm.name === UPDATE_ALARM_NAME) {
     await checkForUpdate();
     await sendHeartbeat();
@@ -259,7 +296,12 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
   // Content script asks for a fresh config pull (on ticket switch / tab focus) so
   // admin changes reflect within seconds of the agent interacting — no reload.
   if (message.action === 'refreshConfigNow') {
-    refreshConfig().then(() => sendResponse({ ok: true }));
+    Promise.all([refreshConfig(), refreshCustomerList()]).then(() => sendResponse({ ok: true }));
+    return true;
+  }
+
+  if (message.action === 'syncFromZendesk') {
+    syncFromZendesk().then(sendResponse);
     return true;
   }
 

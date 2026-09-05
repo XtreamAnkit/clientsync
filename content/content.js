@@ -50,6 +50,39 @@
     } catch (_) { /* not authenticated / API blocked — telemetry falls back to "unknown" */ }
   })();
 
+  // ─── Zendesk active-org sync (runs on request from the settings page) ─────────
+  chrome.runtime.onMessage.addListener((msg, _s, sendResponse) => {
+    if (msg.action === 'fetchZendeskOrgs') {
+      fetchZendeskActiveOrgs()
+        .then(orgs => sendResponse({ orgs }))
+        .catch(e => sendResponse({ error: e.message }));
+      return true; // async response
+    }
+  });
+
+  // Active org = has ticket activity in the last ~6 months (agent-visible search,
+  // capped at ~1000 tickets). Returns [{ name }] — names only, no aliases.
+  async function fetchZendeskActiveOrgs() {
+    const since = new Date(Date.now() - 182 * 24 * 3600 * 1000).toISOString().slice(0, 10);
+    let surl = `/api/v2/search.json?query=${encodeURIComponent('type:ticket updated>' + since)}&per_page=100`;
+    const activeIds = new Set();
+    let pages = 0;
+    while (surl && pages < 10) {
+      const r = await fetch(surl, { credentials: 'include' }).then(x => x.json());
+      (r.results || []).forEach(t => t.organization_id && activeIds.add(t.organization_id));
+      surl = r.next_page; pages++;
+    }
+
+    let ourl = '/api/v2/organizations.json?per_page=100';
+    const out = [];
+    while (ourl) {
+      const r = await fetch(ourl, { credentials: 'include' }).then(x => x.json());
+      r.organizations.forEach(o => activeIds.has(o.id) && out.push({ name: o.name }));
+      ourl = r.next_page;
+    }
+    return out;
+  }
+
   // ─── Selectors ────────────────────────────────────────────────────────────────
 
   const selOrg     = '[data-test-id="tabs-nav-item-organizations"]';
@@ -101,13 +134,24 @@
 
     if (!org || !customers.length) { clearUI(); return; }
 
-    // Exempt orgs (e.g. your own internal org) — never flag on their tickets.
-    const ignoreOrgs = (config.ignore_orgs || '')
-      .split(/[\n,]/).map(s => s.trim().toLowerCase()).filter(Boolean);
-    if (ignoreOrgs.includes(org.toLowerCase())) { clearUI(); return; }
+    const orgLower = org.toLowerCase();
 
-    const inText    = (term, text) => new RegExp(`\\b${term.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}\\b`, 'i').test(text);
-    const orgLower  = org.toLowerCase();
+    // Skip detection entirely on this ticket if its org is exempt. Exempt =
+    //   • an admin-configured exempt org (config.ignore_orgs), OR
+    //   • an INACTIVE customer — "inactive" means this customer's OWN tickets are
+    //     not scanned. (The customer's name is still watched in OTHER tickets.)
+    const exempt = new Set(
+      (config.ignore_orgs || '').split(/[\n,]/).map(s => s.trim().toLowerCase()).filter(Boolean)
+    );
+    customers.forEach(c => {
+      if (c.is_active === false) {
+        exempt.add(c.name.toLowerCase());
+        (c.aliases || []).forEach(a => exempt.add(a.toLowerCase()));
+      }
+    });
+    if (exempt.has(orgLower)) { clearUI(); return; }
+
+    const inText = (term, text) => new RegExp(`\\b${term.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}\\b`, 'i').test(text);
 
     // Terms (name + aliases) belonging to the currently selected client — any hit
     // in this set is the selected client's own alias and must never trigger a warning.
