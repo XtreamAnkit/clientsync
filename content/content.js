@@ -15,6 +15,14 @@
   };
   let config = { ...DEFAULT_CONFIG };
 
+  // Instant LOCAL suppression (glitch fix). When the analyst reports a false
+  // positive or snoozes a ticket, we immediately add the ticket (and, for FP,
+  // the org) here so validate() skips it right away — the warning clears
+  // instantly and never reappears, independent of backend latency / the 402.
+  // Backend quarantine + logging still fire best-effort in the background.
+  const suppressedTickets = new Set(); // by ticket id
+  const suppressedOrgs    = new Set(); // by lowercased org name
+
   chrome.storage.local.get(['customerList', 'csConfig'], r => {
     customers = r.customerList || [];
     if (r.csConfig) config = { ...DEFAULT_CONFIG, ...r.csConfig };
@@ -30,7 +38,15 @@
   // Ask the background worker for a fresh config pull. Called on load, tab focus,
   // and ticket switches so admin changes (kill switch, mode, messages) take effect
   // within seconds of the agent interacting — without anyone reloading anything.
+  // Signals interaction to the background on focus / ticket switch. Debounced to
+  // 10s just to avoid message spam; the background decides whether to actually
+  // fetch (instant on interaction, throttled to once/min) and marks the machine
+  // active so idle machines can pause polling.
+  let lastPoke = 0;
   function pokeConfig() {
+    const now = Date.now();
+    if (now - lastPoke < 10 * 1000) return;
+    lastPoke = now;
     try { chrome.runtime.sendMessage({ action: 'refreshConfigNow' }).catch(() => {}); } catch (_) {}
   }
   document.addEventListener('visibilitychange', () => { if (document.visibilityState === 'visible') pokeConfig(); });
@@ -119,11 +135,16 @@
   // ─── Validation ───────────────────────────────────────────────────────────────
 
   function validate() {
-    // Global kill switch — admin disabled the extension.
-    if (config.enabled === false) { clearUI(); return; }
+    // Global kill switch — admin disabled the extension, or decommissioned it.
+    if (config.enabled === false || config.decommission === true) { clearUI(); return; }
     if (!/\/tickets\/\d+/.test(location.href)) { clearUI(); return; }
 
+    // Local suppression — this ticket was snoozed / reported as a false positive.
+    const curTicket = getActiveTicket();
+    if (curTicket && suppressedTickets.has(curTicket)) { clearUI(); return; }
+
     const org         = getOrg();
+    if (org && suppressedOrgs.has(org.toLowerCase())) { clearUI(); return; }
     const notesEl     = getNotes();
     const noteHrefs   = (notesEl && config.scan_hyperlinks !== false)
       ? [...notesEl.querySelectorAll('a[href]')].map(a => a.getAttribute('href') || '')
@@ -151,7 +172,15 @@
     });
     if (exempt.has(orgLower)) { clearUI(); return; }
 
-    const inText = (term, text) => new RegExp(`\\b${term.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}\\b`, 'i').test(text);
+    // Per-client sensitivity: 'normal' (word boundary, default/current behaviour),
+    // 'strict' (also substring, no boundary), 'loose' (boundary + 4+ char tokens).
+    const termMatches = (term, text, sensitivity) => {
+      if (!term) return false;
+      if (sensitivity === 'loose' && term.length < 4) return false;
+      const e = term.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+      if (sensitivity === 'strict') return new RegExp(e, 'i').test(text);
+      return new RegExp(`\\b${e}\\b`, 'i').test(text);
+    };
 
     // Terms (name + aliases) belonging to the currently selected client — any hit
     // in this set is the selected client's own alias and must never trigger a warning.
@@ -168,10 +197,15 @@
     // Collect matched customers with the specific terms that triggered each match
     const matched = customers
       .map(c => {
-        const hits = [c.name, ...(c.aliases || [])]
+        const sens = c.sensitivity || 'normal';
+        // Custom rules: extra_aliases add watched terms; ignore_terms are never flagged.
+        const ignore = new Set(((c.rules && c.rules.ignore_terms) || []).map(s => String(s).toLowerCase()));
+        const terms = [c.name, ...(c.aliases || []), ...((c.rules && c.rules.extra_aliases) || [])]
+          .filter(t => t && !ignore.has(String(t).toLowerCase()));
+        const hits = terms
           .map(term => {
-            const inVisible = inText(term, notesVisible);
-            const inHref    = inText(term, hrefText);
+            const inVisible = termMatches(term, notesVisible, sens);
+            const inHref    = termMatches(term, hrefText, sens);
             if (!inVisible && !inHref) return null;
             return { term, inHyperlink: !inVisible && inHref };
           })
@@ -318,23 +352,57 @@
           </div>
           <div class="warning-footer">
             <p class="hint">${esc(hint)}</p>
-            <button id="cs-report-fp" class="cs-fp-btn">🚩 Report false positive</button>
+            <div class="cs-fp-actions">
+              <button id="cs-snooze" class="cs-fp-btn">😴 Snooze this ticket</button>
+              <button id="cs-report-fp" class="cs-fp-btn">🚩 Report false positive</button>
+            </div>
           </div>
         </div>
       </div>`;
 
-    const fpBtn = el.querySelector('#cs-report-fp');
-    if (fpBtn) fpBtn.addEventListener('click', () => {
-      fpBtn.disabled = true;
-      fpBtn.textContent = 'Reported ✓ — thanks';
-      try {
-        chrome.runtime.sendMessage({
-          action: 'reportFalsePositive',
-          ticketId: lastDetection?.ticketId || getActiveTicket(),
-          ticketOrg: org,
-          items: lastDetection?.items || []
-        }).catch(() => {});
-      } catch (_) {}
+    const fpBtn    = el.querySelector('#cs-report-fp');
+    const snoozeBtn = el.querySelector('#cs-snooze');
+    const footer   = el.querySelector('.warning-footer');
+
+    // Snooze = dismiss the warning for THIS ticket only (local). No quarantine,
+    // no admin report. Suppress locally and clear instantly.
+    if (snoozeBtn) snoozeBtn.addEventListener('click', () => {
+      const tid = lastDetection?.ticketId || getActiveTicket();
+      if (tid) suppressedTickets.add(tid);
+      clearUI();
+    });
+
+    if (fpBtn && footer) fpBtn.addEventListener('click', () => {
+      footer.innerHTML = `
+        <p class="hint">This will report a false positive to the admin and pause detection on
+          <b>${esc(org)}</b>'s tickets for 10 minutes.</p>
+        <textarea id="cs-fp-comment" class="cs-fp-comment" rows="2" placeholder="Optional comment (why is this a false positive?)"></textarea>
+        <div class="cs-fp-actions">
+          <button id="cs-fp-cancel" class="cs-fp-btn">Cancel</button>
+          <button id="cs-fp-submit" class="cs-fp-btn cs-fp-primary">Submit</button>
+        </div>`;
+      footer.querySelector('#cs-fp-cancel').addEventListener('click', () => validate());
+      footer.querySelector('#cs-fp-submit').addEventListener('click', () => {
+        const comment = footer.querySelector('#cs-fp-comment').value.trim();
+        const tid = lastDetection?.ticketId || getActiveTicket();
+        // Suppress LOCALLY and immediately so the warning clears instantly and
+        // never reappears, regardless of backend latency / the 402. The backend
+        // quarantine + logging still fire best-effort below.
+        if (tid) suppressedTickets.add(tid);
+        if (org) suppressedOrgs.add(org.toLowerCase());
+        try {
+          chrome.runtime.sendMessage({
+            action: 'reportFalsePositive',
+            ticketId: tid,
+            ticketOrg: org,
+            items: lastDetection?.items || [],
+            comment: comment || null
+          }).catch(() => {});
+        } catch (_) {}
+        footer.innerHTML = `<p class="hint">Reported ✓ — detection paused on ${esc(org)}.</p>`;
+        // Clear the whole warning shortly after the confirmation shows.
+        setTimeout(() => clearUI(), 1200);
+      });
     });
   }
 

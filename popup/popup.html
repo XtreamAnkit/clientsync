@@ -15,8 +15,19 @@
       </div>
     </div>
 
+    <div id="introCard" class="intro-card" style="display:none">
+      <button id="introClose" class="intro-close" title="Dismiss">×</button>
+      <div class="intro-title">👋 Welcome to ClientSync</div>
+      <div class="intro-body">ClientSync warns you before a ticket goes to the wrong client. If a warning is ever wrong, use <b>Snooze</b> or <b>Report false positive</b> right in the warning. This popup shows your own impact.</div>
+    </div>
+
     <div id="announceBanner" class="announce-banner" style="display:none">
       <span>📣</span><span id="announceText"></span>
+    </div>
+
+    <div id="impactCard" class="impact-card" style="display:none">
+      <span class="impact-icon">🛡️</span>
+      <span id="impactText" class="impact-text"></span>
     </div>
 
     <div id="updateBanner" class="update-banner">
@@ -26,12 +37,10 @@
           <strong id="updateTitle">Up to date</strong>
           <span id="updateVersion" class="update-version"></span>
         </div>
-        <button id="copyCmdBtn" class="update-link" disabled>Up to date</button>
+        <button id="updateBtn" class="update-link" disabled>Up to date</button>
+        <button id="copyCmdBtn" class="update-copy" title="Copy update command" style="display:none">⧉</button>
       </div>
-      <div id="updateCmdRow" class="update-cmd-row" style="display:none">
-        <code id="updateCmd" class="update-cmd"></code>
-      </div>
-      <div id="updateHint" class="update-hint" style="display:none">Paste in Terminal, then reload at chrome://extensions and refresh Zendesk.</div>
+      <div id="updateHint" class="update-hint" style="display:none">Copies a one-line command — paste it into Terminal and run it, then reload at chrome://extensions and refresh Zendesk.</div>
     </div>
 
     <div class="status-card">

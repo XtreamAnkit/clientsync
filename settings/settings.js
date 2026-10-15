@@ -3,9 +3,13 @@ import {
   addCustomer,
   updateCustomer,
   updateAliases,
-  toggleCustomerActive,
+  setCustomerStatus,
   deleteCustomer
 } from '../background/supabase-config.js';
+
+// Best-effort actor for audit (the logged-in Zendesk agent, cached by the extension).
+let auditActor = 'settings';
+try { chrome.storage.local.get(['agentEmail'], r => { if (r.agentEmail) auditActor = r.agentEmail; }); } catch (_) {}
 
 let allCustomers = [];
 let editingId = null;
@@ -144,8 +148,8 @@ function renderTable(customers) {
       const id       = Number(badge.dataset.id);
       const isActive = badge.dataset.active === 'true';
       try {
-        await toggleCustomerActive(id, !isActive);
-        showToast(isActive ? 'Customer deactivated.' : 'Customer activated.', 'success');
+        await setCustomerStatus({ id, active: !isActive, reason: 'manual', actor: auditActor });
+        showToast(isActive ? 'Customer deactivated (auto-reactivates in 10 min).' : 'Customer activated.', 'success');
         await loadCustomers();
         triggerBackgroundSync();
       } catch (err) {

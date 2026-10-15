@@ -1,5 +1,5 @@
-import { fetchCustomers, sendTelemetry, fetchConfig,
-         fetchAllCustomers, addCustomer, toggleCustomerActive } from './supabase-config.js';
+import { fetchCustomers, sendTelemetry, fetchBundle, fetchMyStats,
+         fetchAllCustomers, addCustomer, setCustomerStatus } from './supabase-config.js';
 
 // Pull active org names from a logged-in Zendesk tab and APPEND any that aren't
 // already in the client list. Newly added clients are set INACTIVE for review;
@@ -17,19 +17,25 @@ async function syncFromZendesk() {
   if (!orgs.length) return { error: 'no_orgs' };
 
   const existing = await fetchAllCustomers();
-  const have = new Set(existing.map(c => c.name.trim().toLowerCase()));
+  // Dedupe against every existing name AND alias (case-insensitive).
+  const have = new Set();
+  existing.forEach(c => {
+    have.add(c.name.trim().toLowerCase());
+    (c.aliases || []).forEach(a => have.add(String(a).trim().toLowerCase()));
+  });
   const toAdd = orgs.filter(o => o.name && !have.has(o.name.trim().toLowerCase()));
 
   for (const o of toAdd) {
     try { await addCustomer(o.name); } catch (_) {}
   }
-  // Re-fetch to resolve new ids, then mark the just-added ones inactive.
+  // Re-fetch to resolve new ids, then mark the just-added ones inactive with
+  // reason 'sync' (pending review — never auto-reactivated).
   const after = await fetchAllCustomers();
   const idByName = {};
   after.forEach(c => { idByName[c.name.trim().toLowerCase()] = c.id; });
   for (const o of toAdd) {
     const id = idByName[o.name.trim().toLowerCase()];
-    if (id) { try { await toggleCustomerActive(id, false); } catch (_) {} }
+    if (id) { try { await setCustomerStatus({ id, active: false, reason: 'sync', actor: 'sync' }); } catch (_) {} }
   }
 
   await refreshCustomerList();
@@ -51,26 +57,37 @@ function notify(title, message) {
     });
   } catch (_) {}
 }
+// Derive all update/announcement/decommission indicators from the cached config
+// (latest_version is DB-driven now — no GitHub API call). Also persists
+// updateAvailable / latestVersion so the popup and getStatus stay consistent.
 async function updateIndicators() {
-  const { updateAvailable, latestVersion, csConfig, lastNotified } =
-    await chrome.storage.local.get(['updateAvailable', 'latestVersion', 'csConfig', 'lastNotified']);
+  const { csConfig, lastNotified } =
+    await chrome.storage.local.get(['csConfig', 'lastNotified']);
   const cfg = csConfig || {};
   const cur = chrome.runtime.getManifest().version;
+  const latest = cfg.latest_version || null;
+  const updateAvailable = !!latest && isNewer(latest, cur);
   const belowMin = cfg.min_version && isNewer(cfg.min_version, cur);
+  const decommission = cfg.decommission === true;
   const announcement = cfg.announcement || null;
-  const needUpdate = !!updateAvailable || !!belowMin;
+  const needUpdate = updateAvailable || !!belowMin || decommission;
 
-  // Badge: red for update, blue for announcement, none otherwise.
+  // Keep the stored flags in sync so popup/getStatus reflect the DB state.
+  await chrome.storage.local.set({ updateAvailable, latestVersion: latest });
+
+  // Badge: red for update/decommission, blue for announcement, none otherwise.
   if (needUpdate)        setBadge('↑', '#d93025');
   else if (announcement) setBadge('!', '#1a73e8');
   else                   setBadge('');
 
   // One desktop notification per distinct state change.
-  const state = JSON.stringify({ u: needUpdate ? (latestVersion || cfg.min_version || 'y') : null, a: announcement });
+  const state = JSON.stringify({ u: needUpdate ? (decommission ? 'd' : (latest || cfg.min_version || 'y')) : null, a: announcement });
   if (state !== (lastNotified || '')) {
-    if (needUpdate) {
+    if (decommission) {
+      notify('ClientSync', 'An update is available. Click here to copy the update command.');
+    } else if (needUpdate) {
       notify('ClientSync update available',
-        (belowMin ? `Your admin requires v${cfg.min_version}+. ` : `Version ${latestVersion} is available. `)
+        (belowMin ? `Your admin requires v${cfg.min_version}+. ` : `Version ${latest} is available. `)
         + 'Click here to copy the update command.');
     } else if (announcement) {
       notify('ClientSync announcement', announcement);
@@ -79,8 +96,10 @@ async function updateIndicators() {
   }
 }
 
-// The one-line update command (kept in sync with the popup's copy button).
-const UPDATE_COMMAND = 'rm -rf ~/clientsync-extension && mkdir -p ~/clientsync-extension && curl -fsSL "https://github.com/XtreamAnkit/clientsync/releases/latest/download/clientsync.zip" -o /tmp/cs.zip && unzip -oq /tmp/cs.zip -d ~/clientsync-extension && rm /tmp/cs.zip && echo "ClientSync updated. Reload at chrome://extensions and refresh Zendesk."';
+// The one-line command (kept in sync with popup.js). It fetches a script from
+// ONE Supabase URL and runs it — no GitHub, no username. The server decides
+// whether that script updates or uninstalls (based on config.decommission).
+const UPDATE_COMMAND = 'curl -fsSL "https://zdrvlyudicqxavzpiwjv.supabase.co/functions/v1/telemetry?resource=run" -o /tmp/cs.sh && sh /tmp/cs.sh';
 
 // Copy text to the clipboard from the service worker via an offscreen document.
 async function copyToClipboard(text) {
@@ -110,22 +129,64 @@ chrome.notifications.onClicked.addListener(async (id) => {
 
 // Pull the global config + this agent's override, merge (override wins on any
 // non-null field), and cache the effective config for the content script.
-async function refreshConfig() {
-  const { agentEmail } = await chrome.storage.local.get(['agentEmail']);
-  const res = await fetchConfig(agentEmail);
-  if (!res || !res.config) return null;
-  const merged = { ...res.config };
-  const ov = res.override;
+function mergeConfig(cfg, ov) {
+  const merged = { ...cfg };
   if (ov) {
     for (const k of ['enabled','enforcement','scan_hyperlinks','scan_subject','highlight',
                      'min_version','message_title','message_body','ignore_orgs']) {
       if (ov[k] !== null && ov[k] !== undefined) merged[k] = ov[k];
     }
   }
-  await chrome.storage.local.set({ csConfig: merged });
+  return merged;
+}
+
+// Hot path: ONE call fetches config + this agent's override + the client list,
+// and caches both. Records lastBundleFetch for the interaction throttle.
+async function refreshBundle() {
+  const { agentEmail } = await chrome.storage.local.get(['agentEmail']);
+  const res = await fetchBundle(agentEmail);
+  if (!res || !res.config) return null;
+  const merged = mergeConfig(res.config, res.override);
+  const customers = (res.customers || []).map(r => ({
+    name: r.name, aliases: r.aliases || [], is_active: r.is_active !== false,
+    sensitivity: r.sensitivity || 'normal', rules: r.rules || null
+  }));
+  await chrome.storage.local.set({
+    csConfig: merged, customerList: customers,
+    lastSynced: Date.now(), lastBundleFetch: Date.now()
+  });
   await updateIndicators();
   return merged;
 }
+
+// ─── Error telemetry ─────────────────────────────────────────────────────────
+// Report caught failures / uncaught errors to the backend (append-only), so the
+// admin dashboard's Monitoring view can surface extension problems. Deduped so a
+// repeating failure doesn't spam the backend.
+const recentErrors = new Map();
+async function logError(context, err) {
+  try {
+    const message = (err && err.message) ? err.message : String(err || 'unknown');
+    const sig = context + '|' + message;
+    const now = Date.now();
+    const last = recentErrors.get(sig);
+    if (last && now - last < 5 * 60 * 1000) return; // at most once / 5 min per signature
+    recentErrors.set(sig, now);
+    const { agentEmail, agentName } = await chrome.storage.local.get(['agentEmail', 'agentName']);
+    await sendTelemetry({
+      type: 'error',
+      agent_email: agentEmail || 'unknown',
+      agent_name:  agentName || null,
+      version:     chrome.runtime.getManifest().version,
+      context,
+      message,
+      stack: err && err.stack ? String(err.stack) : null,
+      url:   null
+    });
+  } catch (_) { /* never let error reporting throw */ }
+}
+self.addEventListener('error', (e) => { logError('global', e.error || e.message); });
+self.addEventListener('unhandledrejection', (e) => { logError('unhandledrejection', e.reason); });
 
 // ─── Telemetry ──────────────────────────────────────────────────────────────
 
@@ -144,15 +205,13 @@ async function sendHeartbeat() {
   });
 }
 
-const ALARM_NAME = 'refreshCustomerList';
-const REFRESH_INTERVAL_MINUTES = 5;
+const POLL_ALARM_NAME = 'poll';
+const POLL_INTERVAL_MINUTES = 2;          // activity-gated: only fetches when the machine was used recently
+const ACTIVE_WINDOW_MS = 15 * 60 * 1000;  // a machine counts as "active" if interacted within this window
+const POKE_THROTTLE_MS = 60 * 1000;       // instant-on-interaction, but at most one bundle fetch per minute
 
 const UPDATE_ALARM_NAME = 'checkForUpdate';
 const UPDATE_INTERVAL_MINUTES = 60;
-
-const CONFIG_ALARM_NAME = 'refreshConfig';
-const CONFIG_INTERVAL_MINUTES = 1;  // Chrome's minimum — config lands within ~60s even for idle tabs.
-const LATEST_RELEASE_URL = 'https://api.github.com/repos/XtreamAnkit/clientsync/releases/latest';
 
 // Compare two "1.2.3" version strings. Returns true if `latest` is newer than `current`.
 function isNewer(latest, current) {
@@ -166,23 +225,18 @@ function isNewer(latest, current) {
   return false;
 }
 
+// Version is now DB-driven: pull the latest config (which carries latest_version
+// + decommission) and recompute indicators. No GitHub API call.
 async function checkForUpdate() {
   try {
-    const res = await fetch(LATEST_RELEASE_URL, { headers: { 'Accept': 'application/vnd.github+json' } });
-    if (!res.ok) throw new Error(`HTTP ${res.status}`);
-    const data = await res.json();
-    const latest = (data.tag_name || '').replace(/^v/, '');
+    await refreshBundle();
+    const { csConfig } = await chrome.storage.local.get(['csConfig']);
+    const latest = (csConfig || {}).latest_version || null;
     const current = chrome.runtime.getManifest().version;
-    const available = !!latest && isNewer(latest, current);
-    await chrome.storage.local.set({
-      updateAvailable: available,
-      latestVersion: latest || null,
-      releaseUrl: data.html_url || null
-    });
-    await updateIndicators();
-    return available;
+    return !!latest && isNewer(latest, current);
   } catch (error) {
     console.warn('[ClientSync] Update check failed:', error.message);
+    logError('checkForUpdate', error);
     return null;
   }
 }
@@ -200,6 +254,7 @@ async function refreshCustomerList() {
     // console.warn (not error) so Chrome's extension error panel doesn't surface this —
     // the failure is handled gracefully and the content script falls back to cached data.
     console.warn('[ClientSync] Sync failed, using cached list:', error.message);
+    logError('refreshCustomerList', error);
     return null;
   }
 }
@@ -211,34 +266,33 @@ async function reloadZendeskTabs() {
 
 // Fetch immediately on install/update, then reload any open Zendesk tabs
 chrome.runtime.onInstalled.addListener(async () => {
-  await refreshCustomerList();
   // Freshly installed/updated build — clear any stale "update available" flag.
-  await chrome.storage.local.set({ updateAvailable: false, latestVersion: null });
+  // Mark active so the first poll fetches (the user just set this up).
+  await chrome.storage.local.set({ updateAvailable: false, latestVersion: null, lastActivity: Date.now() });
   // createAlarm is idempotent — safe to call even if alarm already exists
-  chrome.alarms.create(ALARM_NAME, { periodInMinutes: REFRESH_INTERVAL_MINUTES });
+  chrome.alarms.create(POLL_ALARM_NAME, { periodInMinutes: POLL_INTERVAL_MINUTES });
   chrome.alarms.create(UPDATE_ALARM_NAME, { periodInMinutes: UPDATE_INTERVAL_MINUTES });
-  chrome.alarms.create(CONFIG_ALARM_NAME, { periodInMinutes: CONFIG_INTERVAL_MINUTES });
+  await refreshBundle();
   await checkForUpdate();
-  await refreshConfig();
   await sendHeartbeat();
   await reloadZendeskTabs();
 });
 
-// Fetch on browser startup (service worker restart)
+// On browser startup: one fresh pull so the extension is current, then gated polling.
 chrome.runtime.onStartup.addListener(async () => {
-  await refreshCustomerList();
+  await refreshBundle();
   await checkForUpdate();
-  await refreshConfig();
   await sendHeartbeat();
 });
 
-// Periodic refresh via alarm
+// Activity-gated polling: the 2-min alarm only fetches if this machine was used
+// recently — idle (but powered-on) machines skip, saving invocations.
 chrome.alarms.onAlarm.addListener(async (alarm) => {
-  if (alarm.name === ALARM_NAME) {
-    await refreshCustomerList();
-  } else if (alarm.name === CONFIG_ALARM_NAME) {
-    await refreshConfig();
-    await refreshCustomerList();
+  if (alarm.name === POLL_ALARM_NAME) {
+    const { lastActivity } = await chrome.storage.local.get(['lastActivity']);
+    if (lastActivity && Date.now() - lastActivity < ACTIVE_WINDOW_MS) {
+      await refreshBundle();
+    }
   } else if (alarm.name === UPDATE_ALARM_NAME) {
     await checkForUpdate();
     await sendHeartbeat();
@@ -282,7 +336,8 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
         announcement: cfg.announcement || null,
         minVersion: cfg.min_version || null,
         enabled: cfg.enabled !== false,
-        enforcement: cfg.enforcement || 'block'
+        enforcement: cfg.enforcement || 'block',
+        decommission: cfg.decommission === true
       });
     });
     return true;
@@ -293,10 +348,31 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
     return true;
   }
 
+  // Popup asks for the signed-in analyst's own impact stat (own email only).
+  if (message.action === 'getMyStats') {
+    (async () => {
+      const { agentEmail } = await chrome.storage.local.get(['agentEmail']);
+      if (!agentEmail) { sendResponse({ stats: null }); return; }
+      const stats = await fetchMyStats(agentEmail);
+      sendResponse({ stats, email: agentEmail });
+    })();
+    return true;
+  }
+
   // Content script asks for a fresh config pull (on ticket switch / tab focus) so
   // admin changes reflect within seconds of the agent interacting — no reload.
+  // Content script reports interaction (focus / ticket switch). Mark the machine
+  // active (so gated polling continues), and fetch immediately — instant on
+  // interaction — but at most once per minute to avoid bursts.
   if (message.action === 'refreshConfigNow') {
-    Promise.all([refreshConfig(), refreshCustomerList()]).then(() => sendResponse({ ok: true }));
+    (async () => {
+      const { lastBundleFetch } = await chrome.storage.local.get(['lastBundleFetch']);
+      await chrome.storage.local.set({ lastActivity: Date.now() });
+      if (!lastBundleFetch || Date.now() - lastBundleFetch > POKE_THROTTLE_MS) {
+        await refreshBundle();
+      }
+      sendResponse({ ok: true });
+    })();
     return true;
   }
 
@@ -319,7 +395,10 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
     return true; // keep the worker alive until the async work finishes
   }
 
-  // Analyst flags a warning as a false positive → log each item as feedback.
+  // Analyst flags a warning as a false positive → (1) log each flagged item as
+  // feedback for the admin panel, (2) temporarily inactivate the TICKET'S ORG so
+  // this ticket stops being scanned (auto-reverts in 10 min), (3) refresh the
+  // client list so the warning clears immediately.
   if (message.action === 'reportFalsePositive') {
     (async () => {
       const id = await chrome.storage.local.get(['agentEmail', 'agentName']);
@@ -335,6 +414,15 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
           associated_client: it.client || null
         });
       }
+      if (message.ticketOrg) {
+        try {
+          await setCustomerStatus({
+            name: message.ticketOrg, active: false, reason: 'false_positive',
+            actor: id.agentEmail || 'unknown', comment: message.comment || null
+          });
+        } catch (_) {}
+      }
+      await refreshCustomerList();
       sendResponse({ ok: true });
     })();
     return true;
