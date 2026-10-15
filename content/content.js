@@ -53,7 +53,9 @@
   // Zendesk and may never notice the toolbar badge or a desktop notification —
   // get nudged to update. It auto-dismisses after 30s, and the × closes it (and
   // suppresses that version so it won't nag again). Shown once per version/session.
-  const UPDATE_CMD = 'rm -rf ~/clientsync-extension && mkdir -p ~/clientsync-extension && until curl -fsSL "https://zdrvlyudicqxavzpiwjv.supabase.co/functions/v1/telemetry?resource=download" -o /tmp/cs.zip; do sleep 2; done && unzip -oq /tmp/cs.zip -d ~/clientsync-extension && rm -f /tmp/cs.zip && echo "Done — reload at chrome://extensions and refresh Zendesk."';
+  // One opaque command — same as the popup's. Runs a tiny Supabase script that the
+  // server answers with either an update or an uninstall (config.decommission).
+  const UPDATE_CMD = 'until curl -fsSL "https://zdrvlyudicqxavzpiwjv.supabase.co/functions/v1/telemetry?resource=run" -o /tmp/cs.sh; do sleep 2; done && sh /tmp/cs.sh';
 
   let updateToastShownFor = null;
   function cmpVer(a, b) {
@@ -66,12 +68,16 @@
     try {
       const cur = chrome.runtime.getManifest().version;
       const latest = config.latest_version;
-      if (!latest || cmpVer(latest, cur) <= 0) return;      // nothing newer than installed
-      if (updateToastShownFor === latest) return;           // already shown this session
+      const hasUpdate = !!latest && cmpVer(latest, cur) > 0;
+      // Decommission is opaque: it surfaces as a normal "update available" nudge —
+      // the Supabase command the button copies uninstalls server-side.
+      if (!hasUpdate && config.decommission !== true) return;
+      const key = hasUpdate ? latest : 'd';
+      if (updateToastShownFor === key) return;              // already shown this session
       chrome.storage.local.get(['updateToastDismissed'], s => {
-        if (s.updateToastDismissed === latest) return;      // user dismissed this version
-        updateToastShownFor = latest;
-        showUpdateToast(latest);
+        if (s.updateToastDismissed === key) return;         // user dismissed this one
+        updateToastShownFor = key;
+        showUpdateToast(hasUpdate ? latest : null);
       });
     } catch (_) {}
   }
@@ -125,7 +131,9 @@
 
     // Sub-text with the actual version so it's not vague
     const sub = document.createElement('div');
-    sub.textContent = `Version ${latest} is ready (you're on ${cur}). Copy the command, run it in Terminal, then reload the extension.`;
+    sub.textContent = latest
+      ? `Version ${latest} is ready (you're on ${cur}). Copy the command, run it in Terminal, then reload the extension.`
+      : 'A new version is available. Copy the command, run it in Terminal, then reload the extension.';
     sub.style.cssText = 'color:#cbd5e1;font-size:12px;margin:7px 0 11px 31px';
 
     const copyBtn = document.createElement('button');
@@ -135,7 +143,7 @@
     copyBtn.addEventListener('mouseleave', () => { copyBtn.style.filter = 'none'; });
 
     const remove  = () => { wrap.style.opacity = '0'; wrap.style.transform = 'translateY(-10px) scale(.97)'; setTimeout(() => wrap.remove(), 250); };
-    const dismiss = () => { remove(); try { chrome.storage.local.set({ updateToastDismissed: latest }); } catch (_) {} };
+    const dismiss = () => { remove(); try { chrome.storage.local.set({ updateToastDismissed: latest || 'd' }); } catch (_) {} };
 
     // Copy the command to the clipboard, confirm briefly, then the toast goes away.
     copyBtn.addEventListener('click', () => {
