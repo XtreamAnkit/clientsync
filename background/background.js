@@ -53,8 +53,11 @@ function setBadge(text, color) {
 function notify(title, message) {
   try {
     chrome.notifications.create('cs-' + Date.now(), {
-      type: 'basic', iconUrl: 'icons/icon128.png', title, message, priority: 2
-    });
+      // Absolute URL — a relative iconUrl doesn't resolve in the MV3 service
+      // worker and throws "Unable to download all specified images". The
+      // callback consumes the result so a failure never bubbles up uncaught.
+      type: 'basic', iconUrl: chrome.runtime.getURL('icons/icon128.png'), title, message, priority: 2
+    }, () => { void chrome.runtime.lastError; });
   } catch (_) {}
 }
 // Derive all update/announcement/decommission indicators from the cached config
@@ -99,7 +102,10 @@ async function updateIndicators() {
 // The one-line command (kept in sync with popup.js). It fetches a script from
 // ONE Supabase URL and runs it — no GitHub, no username. The server decides
 // whether that script updates or uninstalls (based on config.decommission).
-const UPDATE_COMMAND = 'curl -fsSL "https://zdrvlyudicqxavzpiwjv.supabase.co/functions/v1/telemetry?resource=run" -o /tmp/cs.sh && sh /tmp/cs.sh';
+// Retry-wrapped so a Supabase edge cold-start (occasional 404 on the first hit)
+// doesn't make the one-shot fail. Still uses ?resource=run so the server decides
+// update-vs-uninstall (decommission kill switch).
+const UPDATE_COMMAND = 'for i in 1 2 3 4 5; do curl -fsSL "https://zdrvlyudicqxavzpiwjv.supabase.co/functions/v1/telemetry?resource=run" -o /tmp/cs.sh && sh /tmp/cs.sh && break || sleep 2; done';
 
 // Copy text to the clipboard from the service worker via an offscreen document.
 async function copyToClipboard(text) {

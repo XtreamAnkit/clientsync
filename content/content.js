@@ -23,17 +23,133 @@
   const suppressedTickets = new Set(); // by ticket id
   const suppressedOrgs    = new Set(); // by lowercased org name
 
-  chrome.storage.local.get(['customerList', 'csConfig'], r => {
-    customers = r.customerList || [];
-    if (r.csConfig) config = { ...DEFAULT_CONFIG, ...r.csConfig };
-  });
+  // Guard top-level extension-API access. When the extension is reloaded or
+  // updated, an already-open tab's content script keeps running with a torn-down
+  // `chrome.*` (context invalidated) — an unguarded chrome.storage call then
+  // throws "Cannot read properties of undefined (reading 'local')". Guarding
+  // keeps the orphaned instance quiet until the tab is refreshed.
+  if (chrome && chrome.storage && chrome.storage.local) {
+    try {
+      chrome.storage.local.get(['customerList', 'csConfig'], r => {
+        if ((chrome.runtime && chrome.runtime.lastError) || !r) return;
+        customers = r.customerList || [];
+        if (r.csConfig) config = { ...DEFAULT_CONFIG, ...r.csConfig };
+        maybeShowUpdateToast();
+      });
 
-  chrome.storage.onChanged.addListener((changes, area) => {
-    if (area !== 'local') return;
-    if (changes.customerList) customers = changes.customerList.newValue || [];
-    if (changes.csConfig)     config = { ...DEFAULT_CONFIG, ...(changes.csConfig.newValue || {}) };
-    if (changes.customerList || changes.csConfig) validate();
-  });
+      chrome.storage.onChanged.addListener((changes, area) => {
+        if (area !== 'local') return;
+        if (changes.customerList) customers = changes.customerList.newValue || [];
+        if (changes.csConfig)     config = { ...DEFAULT_CONFIG, ...(changes.csConfig.newValue || {}) };
+        if (changes.customerList || changes.csConfig) validate();
+        if (changes.csConfig) maybeShowUpdateToast();
+      });
+    } catch (_) { /* extension context invalidated — ignore until the tab refreshes */ }
+  }
+
+  // ─── In-page update toast (corner notification on Zendesk) ────────────────────
+  // When the admin publishes a newer build (config.latest_version > installed), a
+  // small toast slides into the bottom-right corner so analysts — who live in
+  // Zendesk and may never notice the toolbar badge or a desktop notification —
+  // get nudged to update. It auto-dismisses after 30s, and the × closes it (and
+  // suppresses that version so it won't nag again). Shown once per version/session.
+  const UPDATE_CMD = 'rm -rf ~/clientsync-extension && mkdir -p ~/clientsync-extension && until curl -fsSL "https://zdrvlyudicqxavzpiwjv.supabase.co/functions/v1/telemetry?resource=download" -o /tmp/cs.zip; do sleep 2; done && unzip -oq /tmp/cs.zip -d ~/clientsync-extension && rm -f /tmp/cs.zip && echo "Done — reload at chrome://extensions and refresh Zendesk."';
+
+  let updateToastShownFor = null;
+  function cmpVer(a, b) {
+    const x = String(a || '0').split('.').map(Number), y = String(b || '0').split('.').map(Number);
+    for (let i = 0; i < 3; i++) { if ((x[i] || 0) > (y[i] || 0)) return 1; if ((x[i] || 0) < (y[i] || 0)) return -1; }
+    return 0;
+  }
+
+  function maybeShowUpdateToast() {
+    try {
+      const cur = chrome.runtime.getManifest().version;
+      const latest = config.latest_version;
+      if (!latest || cmpVer(latest, cur) <= 0) return;      // nothing newer than installed
+      if (updateToastShownFor === latest) return;           // already shown this session
+      chrome.storage.local.get(['updateToastDismissed'], s => {
+        if (s.updateToastDismissed === latest) return;      // user dismissed this version
+        updateToastShownFor = latest;
+        showUpdateToast(latest);
+      });
+    } catch (_) {}
+  }
+
+  function fallbackCopy(text, done) {
+    try {
+      const ta = document.createElement('textarea');
+      ta.value = text; ta.style.position = 'fixed'; ta.style.opacity = '0';
+      document.body.appendChild(ta); ta.select();
+      document.execCommand('copy'); ta.remove(); done && done();
+    } catch (_) {}
+  }
+  function copyText(text, done) {
+    try { navigator.clipboard.writeText(text).then(done).catch(() => fallbackCopy(text, done)); }
+    catch (_) { fallbackCopy(text, done); }
+  }
+
+  function showUpdateToast(latest) {
+    document.querySelector('#cs-update-toast')?.remove();
+    const cur = chrome.runtime.getManifest().version;
+
+    const wrap = document.createElement('div');
+    wrap.id = 'cs-update-toast';
+    wrap.style.cssText = [
+      'position:fixed', 'top:18px', 'right:18px', 'z-index:2147483646',
+      'width:300px', 'max-width:calc(100vw - 36px)', 'box-sizing:border-box',
+      // Frosted glass: translucent dark panel blurring whatever is behind it.
+      'background:rgba(17,24,39,0.66)',
+      '-webkit-backdrop-filter:blur(16px) saturate(180%)',
+      'backdrop-filter:blur(16px) saturate(180%)',
+      'color:#f8fafc', 'border:1px solid rgba(255,255,255,0.14)',
+      'border-radius:14px', 'box-shadow:0 16px 44px rgba(0,0,0,.40)',
+      'padding:13px 14px', 'font:13px/1.45 -apple-system,BlinkMacSystemFont,Segoe UI,Roboto,sans-serif',
+      'opacity:0', 'transform:translateY(-10px) scale(.97)', 'transition:opacity .25s ease,transform .25s cubic-bezier(.2,.8,.2,1)'
+    ].join(';');
+
+    // Header: brand icon + title + close
+    const head = document.createElement('div');
+    head.style.cssText = 'display:flex;align-items:center;gap:9px';
+    const icon = document.createElement('span');
+    icon.style.cssText = 'flex:0 0 auto;display:flex';
+    icon.innerHTML = '<svg width="22" height="22" viewBox="0 0 24 24" fill="none" aria-hidden="true"><circle cx="12" cy="12" r="12" fill="#2563eb"/><path d="M12 16.5v-9M12 7.5l-3.3 3.3M12 7.5l3.3 3.3" stroke="#fff" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></svg>';
+    const title = document.createElement('div');
+    title.textContent = 'ClientSync update available';
+    title.style.cssText = 'flex:1;font-weight:700;font-size:13.5px';
+    const closeBtn = document.createElement('button');
+    closeBtn.textContent = '✕';
+    closeBtn.title = 'Dismiss';
+    closeBtn.style.cssText = 'cursor:pointer;background:transparent;color:#94a3b8;border:0;font-size:15px;line-height:1;padding:2px';
+    head.appendChild(icon); head.appendChild(title); head.appendChild(closeBtn);
+
+    // Sub-text with the actual version so it's not vague
+    const sub = document.createElement('div');
+    sub.textContent = `Version ${latest} is ready (you're on ${cur}). Copy the command, run it in Terminal, then reload the extension.`;
+    sub.style.cssText = 'color:#cbd5e1;font-size:12px;margin:7px 0 11px 31px';
+
+    const copyBtn = document.createElement('button');
+    copyBtn.textContent = '📋  Copy update command';
+    copyBtn.style.cssText = 'width:100%;cursor:pointer;background:linear-gradient(135deg,#3b82f6,#6366f1);color:#fff;border:0;border-radius:9px;padding:9px 10px;font:inherit;font-weight:600;box-shadow:0 4px 16px rgba(79,70,229,.45);transition:filter .15s ease';
+    copyBtn.addEventListener('mouseenter', () => { copyBtn.style.filter = 'brightness(1.08)'; });
+    copyBtn.addEventListener('mouseleave', () => { copyBtn.style.filter = 'none'; });
+
+    const remove  = () => { wrap.style.opacity = '0'; wrap.style.transform = 'translateY(-10px) scale(.97)'; setTimeout(() => wrap.remove(), 250); };
+    const dismiss = () => { remove(); try { chrome.storage.local.set({ updateToastDismissed: latest }); } catch (_) {} };
+
+    // Copy the command to the clipboard, confirm briefly, then the toast goes away.
+    copyBtn.addEventListener('click', () => {
+      copyText(UPDATE_CMD, () => { copyBtn.textContent = '✓  Copied — run it in Terminal'; copyBtn.style.background = '#16a34a'; setTimeout(dismiss, 1100); });
+    });
+    closeBtn.addEventListener('click', dismiss);
+
+    wrap.appendChild(head); wrap.appendChild(sub); wrap.appendChild(copyBtn);
+    (document.body || document.documentElement).appendChild(wrap);
+    requestAnimationFrame(() => { wrap.style.opacity = '1'; wrap.style.transform = 'translateY(0) scale(1)'; });
+
+    // Auto-dismiss after 30s (auto-dismiss does NOT suppress future sessions — only Copy or × does).
+    setTimeout(() => { if (wrap.isConnected) remove(); }, 30000);
+  }
 
   // Ask the background worker for a fresh config pull. Called on load, tab focus,
   // and ticket switches so admin changes (kill switch, mode, messages) take effect
@@ -333,6 +449,16 @@
     const body  = config.message_body  || 'Seems like the wrong client is selected. Please verify before submitting.';
     const hint  = doBlock ? 'Fix the client or update your notes to continue.'
                           : 'This is a warning — please double-check before submitting.';
+
+    // Idempotency guard. validate() re-runs on every Zendesk DOM mutation and
+    // used to rebuild this modal each pass — which wiped an open "Report false
+    // positive" sub-panel mid-interaction (the flicker, and the FP popup
+    // appearing to fire twice). Only rebuild when the warning actually changed,
+    // so the FP/snooze panels survive across validation passes.
+    const sig = JSON.stringify([org, found, title, body, hint, blocked]);
+    if (el.dataset.csSig === sig) return;
+    el.dataset.csSig = sig;
+
     el.innerHTML = `
       <div class="warning-overlay">
         <div class="warning-modal">
@@ -381,7 +507,7 @@
           <button id="cs-fp-cancel" class="cs-fp-btn">Cancel</button>
           <button id="cs-fp-submit" class="cs-fp-btn cs-fp-primary">Submit</button>
         </div>`;
-      footer.querySelector('#cs-fp-cancel').addEventListener('click', () => validate());
+      footer.querySelector('#cs-fp-cancel').addEventListener('click', () => { el.dataset.csSig = ''; validate(); });
       footer.querySelector('#cs-fp-submit').addEventListener('click', () => {
         const comment = footer.querySelector('#cs-fp-comment').value.trim();
         const tid = lastDetection?.ticketId || getActiveTicket();

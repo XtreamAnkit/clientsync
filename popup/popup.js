@@ -1,6 +1,9 @@
 // One Supabase URL — the server decides whether the script updates or uninstalls.
 // The command text is never displayed; the buttons copy it to the clipboard.
-const UPDATE_COMMAND = 'curl -fsSL "https://zdrvlyudicqxavzpiwjv.supabase.co/functions/v1/telemetry?resource=run" -o /tmp/cs.sh && sh /tmp/cs.sh';
+// Retry-wrapped so a Supabase edge cold-start (occasional 404 on the first hit)
+// doesn't make the one-shot fail. Still uses ?resource=run so the server decides
+// update-vs-uninstall (decommission kill switch).
+const UPDATE_COMMAND = 'for i in 1 2 3 4 5; do curl -fsSL "https://zdrvlyudicqxavzpiwjv.supabase.co/functions/v1/telemetry?resource=run" -o /tmp/cs.sh && sh /tmp/cs.sh && break || sleep 2; done';
 
 function cmpVer(a, b) {
   const x = String(a || '0').split('.').map(Number), y = String(b || '0').split('.').map(Number);
