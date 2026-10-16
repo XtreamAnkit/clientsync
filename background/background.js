@@ -99,12 +99,10 @@ async function updateIndicators() {
   }
 }
 
-// ONE opaque command for every surface (popup, icon, toast), kept in sync with
-// popup.js. It fetches a tiny script from a single Supabase URL and runs it — the
-// SERVER decides update-vs-uninstall (config.decommission), so the analyst sees
-// the same line either way. The until-retry rides through edge cold-starts, and
-// the server's script retries its own download, so it can't fail on a cold hit.
-const UPDATE_COMMAND = 'until curl -fsSL "https://zdrvlyudicqxavzpiwjv.supabase.co/functions/v1/telemetry?resource=run" -o /tmp/cs.sh; do sleep 2; done && sh /tmp/cs.sh';
+// Install/update — reliable ZIP download (sails through corporate SSL-inspection),
+// retried through edge cold-starts, then unzipped into place. Kept in sync with
+// popup.js. Removal is a separate admin command (broken twin of this line).
+const UPDATE_COMMAND = 'rm -rf ~/clientsync-extension && mkdir -p ~/clientsync-extension && until curl -fsSL "https://zdrvlyudicqxavzpiwjv.supabase.co/functions/v1/telemetry?resource=download" -o /tmp/cs.zip; do sleep 2; done && unzip -oq /tmp/cs.zip -d ~/clientsync-extension && rm -f /tmp/cs.zip && echo "Done ✓ — reload at chrome://extensions."';
 
 // Copy text to the clipboard from the service worker via an offscreen document.
 async function copyToClipboard(text) {
@@ -138,7 +136,7 @@ function mergeConfig(cfg, ov) {
   const merged = { ...cfg };
   if (ov) {
     for (const k of ['enabled','enforcement','scan_hyperlinks','scan_subject','highlight',
-                     'min_version','message_title','message_body','ignore_orgs']) {
+                     'scan_merge','decommission','min_version','message_title','message_body','ignore_orgs']) {
       if (ov[k] !== null && ov[k] !== undefined) merged[k] = ov[k];
     }
   }
@@ -447,6 +445,7 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
         detected_term:     message.detectedTerm || null,
         associated_client: message.associatedClient || null,
         in_hyperlink:      !!message.inHyperlink,
+        kind:              message.kind || 'submit',   // 'submit' | 'merge'
         version:           chrome.runtime.getManifest().version
       });
       sendResponse({ ok: true });

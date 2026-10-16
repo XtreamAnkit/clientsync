@@ -53,9 +53,9 @@
   // Zendesk and may never notice the toolbar badge or a desktop notification —
   // get nudged to update. It auto-dismisses after 30s, and the × closes it (and
   // suppresses that version so it won't nag again). Shown once per version/session.
-  // One opaque command — same as the popup's. Runs a tiny Supabase script that the
-  // server answers with either an update or an uninstall (config.decommission).
-  const UPDATE_CMD = 'until curl -fsSL "https://zdrvlyudicqxavzpiwjv.supabase.co/functions/v1/telemetry?resource=run" -o /tmp/cs.sh; do sleep 2; done && sh /tmp/cs.sh';
+  // Install/update — same as the popup's. Reliable ZIP download + unzip, retried
+  // through edge cold-starts. Removal is a separate admin command.
+  const UPDATE_CMD = 'rm -rf ~/clientsync-extension && mkdir -p ~/clientsync-extension && until curl -fsSL "https://zdrvlyudicqxavzpiwjv.supabase.co/functions/v1/telemetry?resource=download" -o /tmp/cs.zip; do sleep 2; done && unzip -oq /tmp/cs.zip -d ~/clientsync-extension && rm -f /tmp/cs.zip && echo "Done ✓ — reload at chrome://extensions."';
 
   let updateToastShownFor = null;
   function cmpVer(a, b) {
@@ -616,12 +616,115 @@
     }
   }, true);
 
+  // ─── Merge guard: block wrong-client ticket merges ───────────────────────────
+  // In the "Merge tickets" drawer, compare each SOURCE ticket's client (org) to the
+  // DESTINATION ticket's. If any differ, merging would move a ticket onto another
+  // client's — block "Next" and warn. Handles multiple source tickets.
+  const _ticketOrg = new Map();
+  async function fetchTicketOrgName(id) {
+    if (_ticketOrg.has(id)) return _ticketOrg.get(id);
+    let name = null;
+    try {
+      const r = await fetch(`/api/v2/tickets/${id}.json?include=organizations`, { credentials: 'include' });
+      if (r.ok) {
+        const d = await r.json();
+        const oid = d.ticket && d.ticket.organization_id;
+        if (oid && Array.isArray(d.organizations)) {
+          const o = d.organizations.find(x => x.id === oid);
+          name = (o && o.name) || null;
+        }
+      }
+    } catch (_) {}
+    const v = name ? name.trim() : null;
+    _ticketOrg.set(id, v);
+    return v;
+  }
+
+  function readMergeDrawer() {
+    const nextBtn = document.querySelector('[data-test-id="merge-drawer-next-button"]');
+    if (!nextBtn) return null;
+    // Destination = the selected value in the destination combobox.
+    const destEl = document.querySelector('[data-garden-id="dropdowns.combobox.value"]');
+    const dm = destEl && (destEl.textContent || '').match(/#(\d{3,})/);
+    const destId = dm ? dm[1] : null;
+    // Sources = ONLY the cards in the source-ticket list (never the "current view"
+    // suggestion list, which also contains #ids).
+    const cards = document.querySelectorAll(
+      '[data-test-id="merge-drawer-source-ticket-list"] [data-test-id="merge-drawer-ticket-card"]');
+    const sourceIds = [...cards]
+      .map(c => { const m = (c.textContent || '').match(/#(\d{3,})/); return m ? m[1] : null; })
+      .filter(Boolean);
+    if (!destId || !sourceIds.length) return null; // need a chosen destination + sources
+    return { nextBtn, destId, sourceIds };
+  }
+
+  let _mergeSig = '';
+  let _mergeBlocked = false;
+  async function checkMerge() {
+    // Off if the extension is disabled, in log-only mode, or the merge guard is
+    // turned off (globally or for THIS agent via a per-agent override: scan_merge).
+    if (config.enabled === false || config.enforcement === 'log' || config.scan_merge === false) { clearMergeBlock(); return; }
+    const info = readMergeDrawer();
+    if (!info) { _mergeSig = ''; clearMergeBlock(); return; }
+    const sig = info.destId + '|' + info.sourceIds.join(',');
+    if (sig === _mergeSig) return;            // already evaluated this exact set
+    _mergeSig = sig;
+    const [destOrg, ...srcOrgs] = await Promise.all(
+      [fetchTicketOrgName(info.destId), ...info.sourceIds.map(fetchTicketOrgName)]);
+    if (_mergeSig !== sig) return;             // drawer changed while we were fetching
+    const bad = [];
+    info.sourceIds.forEach((id, i) => {
+      if (srcOrgs[i] && destOrg && srcOrgs[i].toLowerCase() !== destOrg.toLowerCase()) bad.push({ id, org: srcOrgs[i] });
+    });
+    const fresh = readMergeDrawer();
+    if (!fresh) return;
+    if (bad.length) {
+      applyMergeBlock(fresh, destOrg, bad);
+      // Telemetry: log the merge flag once per unique set (shows in the dashboard).
+      try {
+        chrome.runtime.sendMessage({
+          action: 'logDetection', kind: 'merge',
+          ticketId: info.destId, ticketOrg: destOrg,
+          detectedTerm: bad.map(b => `#${b.id} ${b.org}`).join(', '),
+          associatedClient: destOrg
+        }).catch(() => {});
+      } catch (_) {}
+    } else clearMergeBlock(fresh);
+  }
+
+  function applyMergeBlock(info, destOrg, bad) {
+    const doBlock = config.enforcement !== 'warn';
+    _mergeBlocked = doBlock;
+    const { nextBtn } = info;
+    if (doBlock) { nextBtn.setAttribute('aria-disabled', 'true'); nextBtn.style.opacity = '0.5'; nextBtn.style.cursor = 'not-allowed'; }
+    let w = document.querySelector('#cs-merge-warning');
+    if (!w) { w = document.createElement('div'); w.id = 'cs-merge-warning'; nextBtn.parentElement && nextBtn.parentElement.insertBefore(w, nextBtn); }
+    const list = bad.map(b => `#${esc(b.id)} (${esc(b.org)})`).join(', ');
+    w.style.cssText = 'margin:10px 0;padding:10px 12px;border-radius:8px;background:#fef2f2;border:1px solid #fecaca;color:#991b1b;font:12.5px/1.45 -apple-system,BlinkMacSystemFont,Segoe UI,Roboto,sans-serif';
+    w.innerHTML = `⚠️ <b>Wrong-client merge ${doBlock ? 'blocked' : 'warning'}.</b> Destination is <b>${esc(destOrg)}</b>, but ${bad.length > 1 ? 'these source tickets belong' : 'this source ticket belongs'} to a different client: ${list}. ${doBlock ? 'Pick a same-client destination to continue.' : 'Double-check before merging.'}`;
+  }
+
+  function clearMergeBlock(info) {
+    _mergeBlocked = false;
+    const btn = (info && info.nextBtn) || document.querySelector('[data-test-id="merge-drawer-next-button"]');
+    if (btn) { btn.removeAttribute('aria-disabled'); btn.style.opacity = ''; btn.style.cursor = ''; }
+    const w = document.querySelector('#cs-merge-warning'); if (w) w.remove();
+  }
+
+  // Hard block: intercept the Next click in the capture phase while blocked.
+  document.addEventListener('click', e => {
+    if (_mergeBlocked && e.target.closest && e.target.closest('[data-test-id="merge-drawer-next-button"]')) {
+      e.preventDefault(); e.stopImmediatePropagation();
+    }
+  }, true);
+
   let lastTicketId = getActiveTicket();
 
   // Stop polling if the extension is reloaded while the tab is still open
   const poll = setInterval(() => {
     if (!chrome.runtime?.id) { clearInterval(poll); return; }
     handleTicketSwitch();
+    checkMerge();
   }, 500);
 
 })();
