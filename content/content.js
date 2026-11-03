@@ -11,7 +11,14 @@
   const DEFAULT_CONFIG = {
     enabled: true, enforcement: 'block', scan_hyperlinks: true,
     scan_subject: true, highlight: true, message_title: null, message_body: null,
-    ignore_orgs: null
+    ignore_orgs: null,
+    // Solve guard: for the listed orgs, if a customer has replied, stop analysts
+    // from Solving the ticket (they must move it to Pending/On-hold instead).
+    // Off by default and only ever acts on orgs explicitly listed.
+    solve_guard: false, solve_guard_mode: 'enforce', solve_restrict_orgs: null,
+    // The orchestrator tags a ticket when the customer has responded. That tag —
+    // not comment authorship — is the reliable "customer replied" signal here.
+    solve_restrict_tag: 'first_customer_reseponse'
   };
   let config = { ...DEFAULT_CONFIG };
 
@@ -252,7 +259,28 @@
     return document.querySelectorAll(selOrg)[activeIdx] || null;
   }
 
-  const getOrg     = () => getActiveOrgEl()?.textContent?.trim() || null;
+  // Preferred org source: the customer-context card, which Zendesk renders only
+  // for the ACTIVE ticket and populates even for new/unsaved tickets & fresh
+  // follow-ups (where the legacy tab-index lookup below fails — new-ticket tabs
+  // have no "#<number>" to match on). Falls back to the tab-bar org pill.
+  function getContextOrg() {
+    const el = document.querySelector('[data-test-id="organization_id-field-test-id"] [data-test-id="internal-link-anchor-test-id"]')
+            || document.querySelector('[data-test-id="organization_id-field-test-id"] a')
+            || document.querySelector('[data-test-id="organization_id-field-test-id"] dd');
+    const t = el?.textContent?.trim();
+    return t || null;
+  }
+  const getOrg     = () => {
+    // Existing behaviour for saved tickets is unchanged — the tab-pill lookup
+    // runs first and wins whenever it resolves (which it always does for a
+    // normal numeric ticket, including when several tickets are open).
+    const legacy = getActiveOrgEl()?.textContent?.trim();
+    if (legacy) return legacy;
+    // EXTRA (new): only when the tab-pill lookup can't resolve — i.e. new/unsaved
+    // tickets and fresh follow-ups whose tab has no "#<number>" — fall back to the
+    // active ticket's own customer-context card. Never overrides the legacy path.
+    return getContextOrg() || null;
+  };
   const getNotes   = () => inPanel(selNotes)                      || null;
   const getSubject = () => inPanel(selSubject)?.value?.trim()     || '';
 
@@ -261,7 +289,9 @@
   function validate() {
     // Global kill switch — admin disabled the extension, or decommissioned it.
     if (config.enabled === false || config.decommission === true) { clearUI(); return; }
-    if (!/\/tickets\/\d+/.test(location.href)) { clearUI(); return; }
+    // Match saved tickets (/tickets/123) AND new/unsaved tickets & fresh
+    // follow-ups (/tickets/new/50) — detection must run while composing too.
+    if (!/\/tickets\/(new\/)?\d+/.test(location.href)) { clearUI(); return; }
 
     // Local suppression — this ticket was snoozed / reported as a false positive.
     const curTicket = getActiveTicket();
@@ -599,6 +629,8 @@
     if (tid !== lastTicketId) {
       lastTicketId = tid;
       clearUI();
+      clearSolveGuard();
+      _custReply.clear();                 // re-check customer-reply state for the new ticket
       detachObservers();
       document.querySelectorAll('[data-cs-attached]').forEach(el => el.removeAttribute('data-cs-attached'));
       // Only on an actual ticket switch — NOT on every 500ms poll — so we don't
@@ -718,6 +750,157 @@
     }
   }, true);
 
+  // ─── Solve guard ──────────────────────────────────────────────────────────────
+  // For admin-listed orgs (e.g. PayU India), once a customer has publicly replied,
+  // analysts must not Solve the ticket — only move it to Pending/On-hold/Open.
+  // Two modes (admin-chosen): 'enforce' removes Solved + snaps to Pending;
+  // 'warn' lets the dropdown be, but blocks a solve-submit with a warning.
+
+  // Build the set of restricted org names (+ their aliases) from the admin list.
+  function solveRestrictedSet() {
+    const names = (config.solve_restrict_orgs || '')
+      .split(/[\n,]/).map(s => s.trim().toLowerCase()).filter(Boolean);
+    if (!names.length) return null;                     // empty list = never restrict
+    const set = new Set(names);
+    customers.forEach(c => {
+      if (names.includes((c.name || '').toLowerCase())) {
+        (c.aliases || []).forEach(a => set.add(String(a).toLowerCase()));
+      }
+    });
+    return set;
+  }
+
+  // Has the customer responded? On these orchestrator-driven tickets the customer's
+  // reply is synced in as a PUBLIC comment authored by the ticketing bot (admin
+  // role), so comment-authorship can't tell us. The orchestrator instead sets a
+  // tag (default "first_customer_reseponse"); that tag is the reliable signal.
+  // Cached per ticket id; cleared on ticket switch so it re-checks fresh.
+  const _custReply = new Map();
+  async function ticketHasCustomerReply(id) {
+    if (_custReply.has(id)) return _custReply.get(id);
+    _custReply.set(id, false);                          // avoid duplicate in-flight fetches
+    const wantTag = (config.solve_restrict_tag || '').trim().toLowerCase();
+    try {
+      const r = await fetch(`/api/v2/tickets/${id}.json`, { headers: { Accept: 'application/json' } });
+      if (r.ok) {
+        const d = await r.json();
+        const tags = (d.ticket && d.ticket.tags || []).map(t => String(t).toLowerCase());
+        let has = false;
+        if (wantTag) {
+          has = tags.includes(wantTag);
+        } else {
+          // No tag configured → fall back to a public end-user comment.
+          const cr = await fetch(`/api/v2/tickets/${id}/comments.json?include=users&per_page=100`,
+            { headers: { Accept: 'application/json' } });
+          if (cr.ok) {
+            const cd = await cr.json(); const role = {};
+            (cd.users || []).forEach(u => { role[u.id] = u.role; });
+            has = (cd.comments || []).some(c => c.public && role[c.author_id] === 'end-user');
+          }
+        }
+        _custReply.set(id, has);
+        return has;
+      }
+    } catch (_) {}
+    return false;
+  }
+
+  let _solveGuardOn = false;
+  let _solveGuardOrg = null;
+  async function checkSolveGuard() {
+    if (config.enabled === false || config.solve_guard !== true) { clearSolveGuard(); return; }
+    if (!/\/tickets\/\d+/.test(location.href)) { clearSolveGuard(); return; }  // saved tickets only
+    const restrict = solveRestrictedSet();
+    if (!restrict) { clearSolveGuard(); return; }
+    const org = getOrg();
+    if (!org || !restrict.has(org.toLowerCase())) { clearSolveGuard(); return; }
+    const id = getActiveTicket();
+    if (!id) { clearSolveGuard(); return; }
+    const has = await ticketHasCustomerReply(id);
+    if (!has) { clearSolveGuard(); return; }
+    _solveGuardOn = true;
+    _solveGuardOrg = org;
+    applySolveGuard(org);
+  }
+
+  // Gray-out + disable the Solved option wherever the status menu is rendered.
+  function disableSolvedOption() {
+    document.querySelectorAll('[data-test-id="submit_button-menu-solved"]').forEach(el => {
+      const item = el.closest('[role="menuitem"]') || el;
+      item.style.opacity = '0.4';
+      item.style.pointerEvents = 'none';
+      item.style.cursor = 'not-allowed';
+      item.setAttribute('aria-disabled', 'true');
+      item.dataset.csSolveBlocked = '1';
+    });
+  }
+  function restoreSolvedOption() {
+    document.querySelectorAll('[data-cs-solve-blocked="1"]').forEach(item => {
+      item.style.opacity = ''; item.style.pointerEvents = ''; item.style.cursor = '';
+      item.removeAttribute('aria-disabled'); delete item.dataset.csSolveBlocked;
+    });
+  }
+  // Re-apply the instant Zendesk (re)renders the status menu, not just every poll.
+  const _solveMenuObserver = new MutationObserver(() => {
+    if (_solveGuardOn && config.solve_guard_mode !== 'warn') disableSolvedOption();
+  });
+  try { _solveMenuObserver.observe(document.body, { childList: true, subtree: true }); } catch (_) {}
+
+  function applySolveGuard(org) {
+    const enforce = config.solve_guard_mode !== 'warn';
+    if (enforce) {
+      disableSolvedOption();
+      // If Solved is already the chosen submit action, snap it to Pending.
+      const main = document.querySelector('[data-test-id="submit_button-button"]');
+      if (main && /solved/i.test(main.textContent || '')) setStatusPending();
+    }
+    // Persistent note by the footer so the analyst knows why.
+    let w = document.querySelector('#cs-solve-warning');
+    if (!w) {
+      const footer = document.querySelector('[data-test-id="ticket-footer"]') || document.body;
+      w = document.createElement('div'); w.id = 'cs-solve-warning';
+      footer.insertBefore ? footer.insertBefore(w, footer.firstChild) : footer.appendChild(w);
+    }
+    w.style.cssText = 'margin:8px 12px;padding:9px 12px;border-radius:8px;background:#fff7ed;border:1px solid #fed7aa;color:#9a3412;font:12.5px/1.45 -apple-system,BlinkMacSystemFont,Segoe UI,Roboto,sans-serif';
+    w.textContent = `🔒 ${org}: the customer has replied — move this ticket to Pending/On-hold, not Solved.`;
+  }
+
+  function clearSolveGuard() {
+    _solveGuardOn = false;
+    _solveGuardOrg = null;
+    restoreSolvedOption();
+    const w = document.querySelector('#cs-solve-warning'); if (w) w.remove();
+  }
+
+  // Programmatically set the submit status to Pending (opens the menu, clicks Pending).
+  function setStatusPending() {
+    const menuBtn = document.querySelector('[data-test-id="submit_button-menu-button"]');
+    if (!menuBtn) return;
+    menuBtn.click();
+    setTimeout(() => {
+      const p = document.querySelector('[data-test-id="submit_button-menu-pending"]');
+      if (p) p.click(); else menuBtn.click();
+    }, 160);
+  }
+
+  // Capture-phase backstop: block selecting Solved, or submitting while Solved.
+  document.addEventListener('click', e => {
+    if (!_solveGuardOn || !e.target.closest) return;
+    const solvedItem = e.target.closest('[data-test-id="submit_button-menu-solved"]');
+    const mainBtn    = e.target.closest('[data-test-id="submit_button-button"]');
+    let willSolve = false;
+    if (solvedItem) willSolve = true;
+    else if (mainBtn) {
+      const main = document.querySelector('[data-test-id="submit_button-button"]');
+      willSolve = /solved/i.test(main?.textContent || '');
+    }
+    if (!willSolve) return;
+    e.preventDefault(); e.stopImmediatePropagation();
+    const org = _solveGuardOrg || getOrg() || 'This client';
+    try { alert(`${org}: the customer has replied — this ticket can't be Solved. Please move it to Pending or On-hold.`); } catch (_) {}
+    if (config.solve_guard_mode !== 'warn') setStatusPending();
+  }, true);
+
   let lastTicketId = getActiveTicket();
 
   // Stop polling if the extension is reloaded while the tab is still open
@@ -725,6 +908,7 @@
     if (!chrome.runtime?.id) { clearInterval(poll); return; }
     handleTicketSwitch();
     checkMerge();
+    checkSolveGuard();
   }, 500);
 
 })();

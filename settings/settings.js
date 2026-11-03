@@ -4,16 +4,44 @@ import {
   updateCustomer,
   updateAliases,
   setCustomerStatus,
-  deleteCustomer
+  deleteCustomer,
+  approveCustomer,
+  muteCustomer,
+  unmuteCustomer,
+  fetchMyMutes,
+  fetchConfig
 } from '../background/supabase-config.js';
 
 // Best-effort actor for audit (the logged-in Zendesk agent, cached by the extension).
 let auditActor = 'settings';
-try { chrome.storage.local.get(['agentEmail'], r => { if (r.agentEmail) auditActor = r.agentEmail; }); } catch (_) {}
+let agentEmail = '';
+// Access control (resolved from backend config). Defaults keep the pre-access-control
+// behaviour (full access) until the config says otherwise.
+let guardOn = false;      // config.access_guard — master switch
+let isElevated = true;    // admin-granted exclusion list membership (or guard off)
+let mutedIds = new Set(); // this analyst's personal mutes
 
 let allCustomers = [];
 let editingId = null;
 let deleteTargetId = null;
+
+// Resolve the signed-in analyst's email + permissions before the first render.
+async function loadPermissions() {
+  try {
+    const r = await new Promise(res => chrome.storage.local.get(['agentEmail'], res));
+    agentEmail = (r && r.agentEmail) || '';
+    if (agentEmail) auditActor = agentEmail;
+  } catch (_) {}
+  try {
+    const cfg = await fetchConfig(agentEmail);
+    const c = (cfg && cfg.config) || {};
+    guardOn = c.access_guard === true;
+    const admins = String(c.customer_admins || '').split(/[\n,]/).map(s => s.trim().toLowerCase()).filter(Boolean);
+    // Elevated = guard off (everyone full access), or your email is on the exclusion list.
+    isElevated = !guardOn || (!!agentEmail && admins.includes(agentEmail.toLowerCase()));
+  } catch (_) { guardOn = false; isElevated = true; }
+  try { mutedIds = new Set(await fetchMyMutes(agentEmail)); } catch (_) { mutedIds = new Set(); }
+}
 
 // ─── Helpers ──────────────────────────────────────────────────────────────────
 
@@ -94,11 +122,48 @@ function renderTable(customers) {
   tbody.innerHTML = customers.map(c => {
     const [bg, fg] = avatarPalette(c.name);
     const aliases   = c.aliases || [];
+    // Analysts can ADD aliases but not remove them — hide the × unless elevated.
     const aliasChips = aliases.map((a, i) =>
-      `<span class="alias-chip">${escapeHtml(a)}<button class="alias-remove" data-id="${c.id}" data-idx="${i}" title="Remove alias">×</button></span>`
+      `<span class="alias-chip">${escapeHtml(a)}${isElevated ? `<button class="alias-remove" data-id="${c.id}" data-idx="${i}" title="Remove alias">×</button>` : ''}</span>`
     ).join('');
+
+    // Status cell: pending badge, OR (elevated) the global active toggle, OR
+    // (regular analyst) a personal mute toggle for their own account.
+    let statusCell;
+    if (c.pending) {
+      statusCell = `<span class="badge badge-pending" title="Added by an analyst — awaiting approval. Not watched until approved.">Pending</span>`;
+    } else if (isElevated) {
+      statusCell = `<span class="badge badge-toggle ${c.is_active ? 'active' : 'inactive'}" data-id="${c.id}" data-active="${c.is_active}" title="Click to ${c.is_active ? 'deactivate' : 'activate'} for everyone">${c.is_active ? 'Active' : 'Inactive'}</span>`;
+    } else {
+      const muted = mutedIds.has(c.id);
+      statusCell = `<span class="badge badge-mute ${muted ? 'muted' : 'watching'}" data-mute-id="${c.id}" data-muted="${muted}" title="${muted ? 'Muted for your account — click to watch again' : 'Click to mute for your account only (others unaffected)'}">${muted ? 'Muted (you)' : 'Watching'}</span>`;
+    }
+
+    // Actions cell: elevated users get edit/delete (+ approve on pending rows);
+    // regular analysts get no edit/delete (alias add/remove stays in the name cell).
+    let actionsCell = '';
+    if (isElevated) {
+      const approveBtn = c.pending
+        ? `<button class="btn-row-approve" data-id="${c.id}" data-name="${escapeHtml(c.name)}" title="Approve & activate for everyone">
+             <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><polyline points="20 6 9 17 4 12"/></svg> Approve</button>`
+        : '';
+      actionsCell = `<div class="actions-cell">
+          ${approveBtn}
+          <button class="btn-row-edit" data-id="${c.id}" data-name="${escapeHtml(c.name)}">
+            <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><path d="M11 4H4a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2v-7"/><path d="M18.5 2.5a2.121 2.121 0 0 1 3 3L12 15l-4 1 1-4 9.5-9.5z"/></svg>
+            Edit
+          </button>
+          <button class="btn-row-delete" data-id="${c.id}" data-name="${escapeHtml(c.name)}">
+            <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><polyline points="3 6 5 6 21 6"/><path d="M19 6l-1 14a2 2 0 0 1-2 2H8a2 2 0 0 1-2-2L5 6"/><path d="M10 11v6"/><path d="M14 11v6"/></svg>
+            Delete
+          </button>
+        </div>`;
+    } else {
+      actionsCell = `<span class="date-cell" title="Only admins / elevated users can edit or delete. You can add or remove aliases, and mute clients for yourself.">—</span>`;
+    }
+
     return `
-      <tr>
+      <tr${c.pending ? ' class="row-pending"' : ''}>
         <td>
           <div class="customer-cell">
             <div class="customer-avatar" style="background:${bg};color:${fg};border-color:${bg}">${getInitials(c.name)}</div>
@@ -112,26 +177,8 @@ function renderTable(customers) {
           </div>
         </td>
         <td><span class="date-cell">${formatDate(c.created_at)}</span></td>
-        <td><span class="badge badge-toggle ${c.is_active ? 'active' : 'inactive'}" data-id="${c.id}" data-active="${c.is_active}" title="Click to ${c.is_active ? 'deactivate' : 'activate'}">${c.is_active ? 'Active' : 'Inactive'}</span></td>
-        <td>
-          <div class="actions-cell">
-            <button class="btn-row-edit" data-id="${c.id}" data-name="${escapeHtml(c.name)}">
-              <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round">
-                <path d="M11 4H4a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2v-7"/>
-                <path d="M18.5 2.5a2.121 2.121 0 0 1 3 3L12 15l-4 1 1-4 9.5-9.5z"/>
-              </svg>
-              Edit
-            </button>
-            <button class="btn-row-delete" data-id="${c.id}" data-name="${escapeHtml(c.name)}">
-              <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round">
-                <polyline points="3 6 5 6 21 6"/>
-                <path d="M19 6l-1 14a2 2 0 0 1-2 2H8a2 2 0 0 1-2-2L5 6"/>
-                <path d="M10 11v6"/><path d="M14 11v6"/>
-              </svg>
-              Delete
-            </button>
-          </div>
-        </td>
+        <td>${statusCell}</td>
+        <td>${actionsCell}</td>
       </tr>`;
   }).join('');
 
@@ -158,6 +205,33 @@ function renderTable(customers) {
     });
   });
 
+  // Personal mute toggle (regular analysts) — mutes/unmutes for THIS account only.
+  tbody.querySelectorAll('.badge-mute').forEach(badge => {
+    badge.addEventListener('click', async () => {
+      const id    = Number(badge.dataset.muteId);
+      const muted = badge.dataset.muted === 'true';
+      try {
+        if (muted) { await unmuteCustomer(id, agentEmail); mutedIds.delete(id); showToast('Watching again — this client is no longer muted for you.', 'success'); }
+        else       { await muteCustomer(id, agentEmail);   mutedIds.add(id);    showToast('Muted for your account only — others are unaffected.', 'success'); }
+        applySearch();
+        triggerBackgroundSync();
+      } catch (err) { showToast(`Error: ${err.message}`, 'error'); }
+    });
+  });
+
+  // Approve a pending customer (elevated only) — activates it fleet-wide.
+  tbody.querySelectorAll('.btn-row-approve').forEach(btn => {
+    btn.addEventListener('click', async () => {
+      const id = Number(btn.dataset.id);
+      try {
+        await approveCustomer(id, auditActor);
+        showToast(`"${btn.dataset.name}" approved and activated.`, 'success');
+        await loadCustomers();
+        triggerBackgroundSync();
+      } catch (err) { showToast(`Error: ${err.message}`, 'error'); }
+    });
+  });
+
   tbody.querySelectorAll('.alias-remove').forEach(btn => {
     btn.addEventListener('click', async e => {
       e.stopPropagation();
@@ -167,7 +241,7 @@ function renderTable(customers) {
       if (!customer) return;
       const newAliases = (customer.aliases || []).filter((_, i) => i !== idx);
       try {
-        await updateAliases(id, newAliases);
+        await updateAliases(id, newAliases, auditActor);
         await loadCustomers();
         triggerBackgroundSync();
       } catch (err) {
@@ -199,7 +273,7 @@ function renderTable(customers) {
         if (!customer) { cancel(); return; }
         const newAliases = [...(customer.aliases || []), alias];
         try {
-          await updateAliases(id, newAliases);
+          await updateAliases(id, newAliases, auditActor);
           await loadCustomers();
           triggerBackgroundSync();
         } catch (err) {
@@ -224,6 +298,7 @@ async function loadCustomers() {
   setSyncState('syncing', 'Syncing…');
   try {
     allCustomers = await fetchAllCustomers();
+    if (!isElevated) { try { mutedIds = new Set(await fetchMyMutes(agentEmail)); } catch (_) {} }
     updateStats(allCustomers);
     applySearch();
     setSyncState('ok', 'Synced');
@@ -359,11 +434,13 @@ async function handleSave() {
 
   try {
     if (editingId !== null) {
-      await updateCustomer(editingId, name);
+      await updateCustomer(editingId, name, auditActor);
       showToast(`"${name}" updated successfully.`, 'success');
     } else {
-      await addCustomer(name);
-      showToast(`"${name}" added successfully.`, 'success');
+      await addCustomer(name, auditActor);
+      showToast(guardOn && !isElevated
+        ? `"${name}" added as pending — awaiting admin approval before it's watched.`
+        : `"${name}" added successfully.`, 'success');
     }
     closeModal('customerModal');
     await loadCustomers();
@@ -405,7 +482,7 @@ document.getElementById('confirmDeleteBtn').addEventListener('click', async () =
 
   try {
     const name = allCustomers.find(c => c.id === deleteTargetId)?.name ?? 'Customer';
-    await deleteCustomer(deleteTargetId);
+    await deleteCustomer(deleteTargetId, auditActor);
     showToast(`"${name}" removed.`, 'success');
     closeModal('deleteModal');
     await loadCustomers();
@@ -540,8 +617,8 @@ document.getElementById('confirmImportBtn').addEventListener('click', async () =
   let added = 0, failed = 0;
   for (const { name, aliases } of parsed) {
     try {
-      const [result] = await addCustomer(name);
-      if (aliases.length) await updateAliases(result.id, aliases);
+      const [result] = await addCustomer(name, auditActor);
+      if (aliases.length) await updateAliases(result.id, aliases, auditActor);
       added++;
     } catch {
       failed++;
@@ -564,4 +641,4 @@ document.getElementById('confirmImportBtn').addEventListener('click', async () =
 
 // ─── Init ─────────────────────────────────────────────────────────────────────
 
-loadCustomers();
+loadPermissions().then(loadCustomers);

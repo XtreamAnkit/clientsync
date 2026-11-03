@@ -619,6 +619,26 @@ tbody tr:hover { background: var(--gray-50); }
 }
 .badge-toggle:hover { opacity: 0.75; transform: scale(0.97); }
 
+/* Access-control badges */
+.badge-pending { background: var(--amber-50, #fef3c7); color: var(--amber-700, #92400e); border: 1px solid var(--amber-100, #fde68a); }
+.badge-pending::before { background: var(--amber-600, #d97706); }
+.badge-mute { cursor: pointer; user-select: none; transition: opacity var(--duration) var(--ease), transform var(--duration) var(--ease); }
+.badge-mute:hover { opacity: 0.75; transform: scale(0.97); }
+.badge-mute.watching { background: var(--green-50); color: var(--green-700); border: 1px solid var(--green-100); }
+.badge-mute.watching::before { background: var(--green-600); }
+.badge-mute.muted { background: var(--gray-100); color: var(--gray-500); border: 1px solid var(--gray-200); }
+.badge-mute.muted::before { background: var(--gray-400); }
+.row-pending { background: color-mix(in srgb, var(--amber-50, #fef3c7) 35%, transparent); }
+
+.btn-row-approve {
+  display: inline-flex; align-items: center; gap: 5px;
+  padding: 6px 11px; border: 1px solid transparent; border-radius: var(--radius-sm);
+  font-family: var(--font); font-size: 12px; font-weight: 600; cursor: pointer;
+  transition: all var(--duration) var(--ease); white-space: nowrap;
+  background: var(--green-600, #16a34a); color: #fff;
+}
+.btn-row-approve:hover { filter: brightness(1.06); }
+
 /* Action buttons */
 .actions-cell {
   display: flex;

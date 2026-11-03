@@ -40,4 +40,29 @@ rm -f ~/clientsync.zip
 zip -rq ~/clientsync.zip . -x ".*" -x "*.DS_Store" -x "*.git*"
 gh release create "v$NEW" ~/clientsync.zip --repo "$REPO" --title "v$NEW" --notes "$MSG"
 
-echo "Published v$NEW. Teammates below v$NEW will now see the update banner."
+echo "Published v$NEW."
+
+# ─── Point the backend at this release ────────────────────────────────────────
+# Sets latest_version AND min_version to $NEW (every release is mandatory), and
+# repoints the download to the new GitHub asset. The admin secret is read from a
+# local file / env var so it NEVER lands in this public repo or the shipped zip.
+TELEMETRY="https://zdrvlyudicqxavzpiwjv.supabase.co/functions/v1/telemetry"
+ADMIN_SECRET="${CLIENTSYNC_ADMIN_SECRET:-$(cat "$HOME/.clientsync_admin" 2>/dev/null)}"
+if [ -z "$ADMIN_SECRET" ]; then
+  echo "NOTE: no admin secret found — backend not updated automatically."
+  echo "      Set it once:  echo 'YOUR_ADMIN_PASSWORD' > ~/.clientsync_admin && chmod 600 ~/.clientsync_admin"
+  echo "      Until then, set latest_version/min_version to $NEW in the admin panel."
+else
+  ASSET_ID=$(gh api "repos/$REPO/releases/tags/v$NEW" --jq '.assets[] | select(.name=="clientsync.zip") | .id' 2>/dev/null)
+  ZIP_URL="https://api.github.com/repos/$REPO/releases/assets/$ASSET_ID"
+  HTTP=$(curl -s -o /dev/null -w "%{http_code}" -X POST "$TELEMETRY" \
+    -H "x-admin-secret: $ADMIN_SECRET" -H "Content-Type: application/json" \
+    -d "{\"type\":\"config_update\",\"latest_version\":\"$NEW\",\"min_version\":\"$NEW\",\"github_zip_url\":\"$ZIP_URL\"}")
+  if [ "$HTTP" = "200" ] || [ "$HTTP" = "204" ]; then
+    echo "Backend updated: latest_version=min_version=$NEW, download → asset $ASSET_ID."
+  else
+    echo "WARN: backend config update failed (HTTP $HTTP) — set latest_version/min_version to $NEW in the admin panel."
+  fi
+fi
+
+echo "Done. Every agent below v$NEW now sees a REQUIRED update."

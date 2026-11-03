@@ -124,23 +124,58 @@ export async function fetchAllCustomers() {
 }
 
 // Add a new customer. Returns [row] (first element has .id) so the settings
-// bulk-import can immediately attach aliases to the new id.
-export async function addCustomer(name) {
+// bulk-import can immediately attach aliases to the new id. `actor` is the
+// analyst's email — the server uses it to decide elevation + to audit, and
+// (when access_guard is on) a non-elevated add lands pending.
+export async function addCustomer(name, actor) {
   const row = await handleResponse(await failoverFetch(TELEMETRY_PATH, {
     method: 'POST',
     headers: HEADERS,
-    body: JSON.stringify({ type: 'customer_add', name: name.trim() })
+    body: JSON.stringify({ type: 'customer_add', name: name.trim(), actor })
   }));
   return [row];
 }
 
-// Update an existing customer's name
-export async function updateCustomer(id, name) {
+// Update an existing customer's name (elevated/admin only when access_guard on).
+export async function updateCustomer(id, name, actor) {
   return handleResponse(await failoverFetch(TELEMETRY_PATH, {
     method: 'POST',
     headers: HEADERS,
-    body: JSON.stringify({ type: 'customer_update', id, name: name.trim() })
+    body: JSON.stringify({ type: 'customer_update', id, name: name.trim(), actor })
   }));
+}
+
+// Approve a pending customer (elevated/admin only). Activates it fleet-wide.
+export async function approveCustomer(id, actor) {
+  return handleResponse(await failoverFetch(TELEMETRY_PATH, {
+    method: 'POST',
+    headers: HEADERS,
+    body: JSON.stringify({ type: 'customer_approve', id, actor })
+  }));
+}
+
+// Per-agent personal mute / unmute — drops this client from THIS analyst's
+// detection only. Allowed for any analyst, for their own account.
+export async function muteCustomer(id, agentEmail) {
+  return handleResponse(await failoverFetch(TELEMETRY_PATH, {
+    method: 'POST', headers: HEADERS,
+    body: JSON.stringify({ type: 'customer_mute', customer_id: id, agent_email: agentEmail, actor: agentEmail })
+  }));
+}
+export async function unmuteCustomer(id, agentEmail) {
+  return handleResponse(await failoverFetch(TELEMETRY_PATH, {
+    method: 'POST', headers: HEADERS,
+    body: JSON.stringify({ type: 'customer_unmute', customer_id: id, agent_email: agentEmail, actor: agentEmail })
+  }));
+}
+
+// This analyst's muted customer ids.
+export async function fetchMyMutes(agentEmail) {
+  if (!agentEmail) return [];
+  try {
+    const data = await handleResponse(await failoverFetch(`${TELEMETRY_PATH}?resource=my_mutes&email=${encodeURIComponent(agentEmail)}`, { headers: HEADERS }));
+    return (data && data.muted) || [];
+  } catch (_) { return []; }
 }
 
 // Toggle a customer's active status (kept for completeness; the settings page
@@ -153,18 +188,19 @@ export async function toggleCustomerActive(id, isActive) {
   }));
 }
 
-// Update aliases for a customer
-export async function updateAliases(id, aliases) {
+// Update aliases for a customer (allowed for any analyst).
+export async function updateAliases(id, aliases, actor) {
   return handleResponse(await failoverFetch(TELEMETRY_PATH, {
     method: 'POST',
     headers: HEADERS,
-    body: JSON.stringify({ type: 'customer_update', id, aliases })
+    body: JSON.stringify({ type: 'customer_update', id, aliases, actor })
   }));
 }
 
-// Delete a customer
-export async function deleteCustomer(id) {
-  return handleResponse(await failoverFetch(`${TELEMETRY_PATH}?customer_id=${encodeURIComponent(id)}`, {
+// Delete a customer (elevated/admin only when access_guard on).
+export async function deleteCustomer(id, actor) {
+  const qs = `?customer_id=${encodeURIComponent(id)}${actor ? `&actor=${encodeURIComponent(actor)}` : ''}`;
+  return handleResponse(await failoverFetch(`${TELEMETRY_PATH}${qs}`, {
     method: 'DELETE',
     headers: HEADERS
   }));
