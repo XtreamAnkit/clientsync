@@ -673,10 +673,15 @@
   }
 
   function readMergeDrawer() {
-    const nextBtn = document.querySelector('[data-test-id="merge-drawer-next-button"]');
+    const drawer = document.querySelector('[data-test-id="merge-drawer"]');
+    if (!drawer) return null;
+    const nextBtn = drawer.querySelector('[data-test-id="merge-drawer-next-button"]')
+      || document.querySelector('[data-test-id="merge-drawer-next-button"]');
     if (!nextBtn) return null;
-    // Destination = the selected value in the destination combobox.
-    const destEl = document.querySelector('[data-garden-id="dropdowns.combobox.value"]');
+    // Destination = the selected value in the destination combobox. MUST be scoped to
+    // the merge drawer — a page-wide query grabs the left panel's Brand dropdown
+    // ("snowbit") instead, which has no #id, silently disabling the guard.
+    const destEl = drawer.querySelector('[data-garden-id="dropdowns.combobox.value"]');
     const dm = destEl && (destEl.textContent || '').match(/#(\d{3,})/);
     const destId = dm ? dm[1] : null;
     // Sources = ONLY the cards in the source-ticket list (never the "current view"
