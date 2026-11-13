@@ -18,7 +18,24 @@
     solve_guard: false, solve_guard_mode: 'enforce', solve_restrict_orgs: null,
     // The orchestrator tags a ticket when the customer has responded. That tag —
     // not comment authorship — is the reliable "customer replied" signal here.
-    solve_restrict_tag: 'first_customer_reseponse'
+    solve_restrict_tag: 'first_customer_reseponse',
+    // CC cross-domain guard: on a PUBLIC reply, block sending when any CC recipient's
+    // email domain differs from the ticket requester's (the client's) domain — the
+    // wrong-merge leak where another client ends up on the mail chain. Internal
+    // notes are never affected (they don't email CCs). Off by default.
+    // allow_domains: never treated as a leak (default: our own internal domain).
+    // restrict_orgs: empty = all clients; otherwise only those orgs.
+    cc_guard: false, cc_guard_mode: 'enforce',
+    cc_guard_allow_domains: 'coralogix.com', cc_guard_restrict_orgs: null,
+    // Admin custom notifications: a message the admin pushes to analysts' screens,
+    // shown in-page like the update toast (dismissible + collapsible). notif_id
+    // changes each time the admin (re)sends, so a new message re-shows even after
+    // a prior dismissal. notif_targets: emails (newline/comma) — empty = everyone.
+    notif_active: false, notif_id: null, notif_title: null, notif_body: null,
+    notif_level: 'info', notif_targets: null,
+    // 'update' => the notification shows a "Copy update command" button (same as the
+    // auto update toast), so an admin can nudge outdated users with a custom message.
+    notif_action: null
   };
   let config = { ...DEFAULT_CONFIG };
 
@@ -42,6 +59,7 @@
         customers = r.customerList || [];
         if (r.csConfig) config = { ...DEFAULT_CONFIG, ...r.csConfig };
         maybeShowUpdateToast();
+        maybeShowNotif();
       });
 
       chrome.storage.onChanged.addListener((changes, area) => {
@@ -49,7 +67,7 @@
         if (changes.customerList) customers = changes.customerList.newValue || [];
         if (changes.csConfig)     config = { ...DEFAULT_CONFIG, ...(changes.csConfig.newValue || {}) };
         if (changes.customerList || changes.csConfig) validate();
-        if (changes.csConfig) maybeShowUpdateToast();
+        if (changes.csConfig) { maybeShowUpdateToast(); maybeShowNotif(); }
       });
     } catch (_) { /* extension context invalidated — ignore until the tab refreshes */ }
   }
@@ -166,6 +184,112 @@
     setTimeout(() => { if (wrap.isConnected) remove(); }, 30000);
   }
 
+  // ─── In-page custom notification (admin broadcast) ────────────────────────────
+  // The admin pushes a message from the dashboard; it appears in the top-right like
+  // the update toast. Analysts can collapse it to a small pill or dismiss it. A
+  // dismissal is remembered per notif_id, so re-sending (new id) shows it again.
+  const NOTIF_LEVELS = {
+    info:    { dot: '#2563eb', name: 'ClientSync' },
+    success: { dot: '#16a34a', name: 'ClientSync' },
+    warn:    { dot: '#d97706', name: 'ClientSync' }
+  };
+  function notifKey() {
+    return String(config.notif_id || '') || ('h' + String((config.notif_title || '') + '|' + (config.notif_body || '')).length
+      + '-' + ((config.notif_body || '').slice(0, 24)));
+  }
+  function maybeShowNotif() {
+    try {
+      if (config.notif_active !== true || !(config.notif_body || config.notif_title)) {
+        document.querySelector('#cs-notif-toast')?.remove(); return;
+      }
+      const key = notifKey();
+      chrome.storage.local.get(['agentEmail', 'notifDismissed', 'notifCollapsed'], s => {
+        if ((chrome.runtime && chrome.runtime.lastError) || !s) return;
+        // Targeting: if a recipient list is set, only show to those agents.
+        const targets = String(config.notif_targets || '').split(/[\n,;\s]+/).map(x => x.trim().toLowerCase()).filter(Boolean);
+        if (targets.length) {
+          const me = String(s.agentEmail || '').toLowerCase();
+          if (!me || !targets.includes(me)) { document.querySelector('#cs-notif-toast')?.remove(); return; }
+        }
+        if (s.notifDismissed === key) { document.querySelector('#cs-notif-toast')?.remove(); return; }
+        showNotifToast(key, s.notifCollapsed === key);
+      });
+    } catch (_) {}
+  }
+
+  function showNotifToast(key, startCollapsed) {
+    document.querySelector('#cs-notif-toast')?.remove();
+    const lvl = NOTIF_LEVELS[config.notif_level] || NOTIF_LEVELS.info;
+    const titleText = config.notif_title || 'ClientSync notification';
+    const bodyText = config.notif_body || '';
+    // Sit below the update toast if that one is currently showing.
+    const top = document.querySelector('#cs-update-toast') ? 150 : 18;
+
+    const wrap = document.createElement('div');
+    wrap.id = 'cs-notif-toast';
+    wrap.style.cssText = [
+      'position:fixed', 'top:' + top + 'px', 'right:18px', 'z-index:2147483646',
+      'width:320px', 'max-width:calc(100vw - 36px)', 'box-sizing:border-box',
+      'background:rgba(17,24,39,0.66)',
+      '-webkit-backdrop-filter:blur(16px) saturate(180%)', 'backdrop-filter:blur(16px) saturate(180%)',
+      'color:#f8fafc', 'border:1px solid rgba(255,255,255,0.14)',
+      'border-radius:14px', 'box-shadow:0 16px 44px rgba(0,0,0,.40)',
+      'padding:12px 13px', 'font:13px/1.45 -apple-system,BlinkMacSystemFont,Segoe UI,Roboto,sans-serif',
+      'opacity:0', 'transform:translateY(-10px) scale(.97)', 'transition:opacity .25s ease,transform .25s cubic-bezier(.2,.8,.2,1)'
+    ].join(';');
+
+    const head = document.createElement('div');
+    head.style.cssText = 'display:flex;align-items:center;gap:9px';
+    const dot = document.createElement('span');
+    dot.style.cssText = `flex:0 0 auto;width:10px;height:10px;border-radius:50%;background:${lvl.dot};box-shadow:0 0 0 4px ${lvl.dot}22`;
+    const title = document.createElement('div');
+    title.textContent = titleText;
+    title.style.cssText = 'flex:1;font-weight:700;font-size:13.5px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis';
+    const collapseBtn = document.createElement('button');
+    collapseBtn.title = 'Collapse';
+    collapseBtn.style.cssText = 'cursor:pointer;background:transparent;color:#94a3b8;border:0;font-size:14px;line-height:1;padding:2px 4px';
+    const closeBtn = document.createElement('button');
+    closeBtn.textContent = '✕'; closeBtn.title = 'Dismiss';
+    closeBtn.style.cssText = 'cursor:pointer;background:transparent;color:#94a3b8;border:0;font-size:15px;line-height:1;padding:2px';
+    head.appendChild(dot); head.appendChild(title); head.appendChild(collapseBtn); head.appendChild(closeBtn);
+
+    const body = document.createElement('div');
+    body.textContent = bodyText;
+    body.style.cssText = 'color:#cbd5e1;font-size:12.5px;margin:8px 0 2px 19px;white-space:pre-wrap;word-break:break-word';
+
+    const remove  = () => { wrap.style.opacity = '0'; wrap.style.transform = 'translateY(-10px) scale(.97)'; setTimeout(() => wrap.remove(), 250); };
+    const dismiss = () => { remove(); try { chrome.storage.local.set({ notifDismissed: key }); } catch (_) {} };
+    let collapsed = !!startCollapsed;
+    let updateBtn = null;
+    const applyCollapsed = () => {
+      body.style.display = collapsed ? 'none' : '';
+      if (updateBtn) updateBtn.style.display = collapsed ? 'none' : '';
+      collapseBtn.textContent = collapsed ? '▸' : '▾';
+      collapseBtn.title = collapsed ? 'Expand' : 'Collapse';
+      try { chrome.storage.local.set(collapsed ? { notifCollapsed: key } : { notifCollapsed: null }); } catch (_) {}
+    };
+    collapseBtn.addEventListener('click', () => { collapsed = !collapsed; applyCollapsed(); });
+    title.addEventListener('click', () => { if (collapsed) { collapsed = false; applyCollapsed(); } });
+    closeBtn.addEventListener('click', dismiss);
+
+    wrap.appendChild(head); wrap.appendChild(body);
+
+    // Optional "Update now" action — copies the update command, like the auto toast.
+    if (config.notif_action === 'update') {
+      updateBtn = document.createElement('button');
+      updateBtn.textContent = '📋  Update now — copy command';
+      updateBtn.style.cssText = 'width:calc(100% - 19px);margin:4px 0 2px 19px;cursor:pointer;background:linear-gradient(135deg,#3b82f6,#6366f1);color:#fff;border:0;border-radius:9px;padding:8px 10px;font:inherit;font-weight:600;box-shadow:0 4px 16px rgba(79,70,229,.45)';
+      updateBtn.addEventListener('click', () => {
+        copyText(UPDATE_CMD, () => { updateBtn.textContent = '✓  Copied — run it in Terminal'; updateBtn.style.background = '#16a34a'; });
+      });
+      wrap.appendChild(updateBtn);
+    }
+
+    (document.body || document.documentElement).appendChild(wrap);
+    applyCollapsed();
+    requestAnimationFrame(() => { wrap.style.opacity = '1'; wrap.style.transform = 'translateY(0) scale(1)'; });
+  }
+
   // Ask the background worker for a fresh config pull. Called on load, tab focus,
   // and ticket switches so admin changes (kill switch, mode, messages) take effect
   // within seconds of the agent interacting — without anyone reloading anything.
@@ -249,9 +373,22 @@
   function getActiveOrgEl() {
     const activeId = getActiveTicket();
     if (!activeId) return null;
-    // tabs-section-nav-item-ticket and tabs-nav-item-organizations share the same nav
-    // and appear in the same DOM order — match by ticket number to find the right index.
-    // Filter out placeholder entries (e.g. "Ticket" with no number) — they have no org pill
+    // Each OPEN ticket pane has its own breadcrumb <nav> containing that ticket's
+    // own org/user/ticket pills. Read the org pill from the ACTIVE ticket's OWN nav,
+    // scoped — so we can never pick up a neighbouring open ticket's org.
+    //
+    // (The old approach collected every org pill across all mounted ticket panes
+    //  into one flat list and matched by positional index. When several tickets
+    //  were open — or an org-less ticket / a "#-1" new-ticket placeholder shifted
+    //  the lists — the index slipped and returned the WRONG ticket's org, producing
+    //  false "wrong client" warnings. This scopes the lookup to the active ticket.)
+    const ticketSpan = [...document.querySelectorAll('[data-test-id="tabs-section-nav-item-ticket"]')]
+      .find(t => t.textContent.includes(`#${activeId}`));
+    const nav = ticketSpan ? ticketSpan.closest('nav') : null;
+    // nav found ⇒ trust it (null org pill here just means this ticket is org-less).
+    if (nav) return nav.querySelector(selOrg) || null;
+    // Fallback (only when the active ticket's breadcrumb nav can't be found at all):
+    // legacy positional match across the global lists.
     const oldTabs = [...document.querySelectorAll('[data-test-id="tabs-section-nav-item-ticket"]')]
       .filter(t => /\#\d+/.test(t.textContent));
     const activeIdx = oldTabs.findIndex(t => t.textContent.includes(`#${activeId}`));
@@ -692,18 +829,56 @@
       .map(c => { const m = (c.textContent || '').match(/#(\d{3,})/); return m ? m[1] : null; })
       .filter(Boolean);
     if (!destId || !sourceIds.length) return null; // need a chosen destination + sources
-    return { nextBtn, destId, sourceIds };
+    return { btn: nextBtn, destId, sourceIds, stage: 'step1' };
+  }
+
+  // Step 2 ("Review merge") backstop: read the source + destination ticket ids from
+  // the review screen and the final "Merge tickets" button, so a cross-client merge
+  // missed at step 1 is still caught before the final confirm.
+  function readMergeReview() {
+    const drawer = document.querySelector('[data-test-id="merge-drawer"]');
+    if (!drawer) return null;
+    const container = drawer.querySelector('[data-test-id="merge-drawer-review-merge"]');
+    if (!container) return null;                          // not on the review step
+    const btn = drawer.querySelector('[data-test-id="merge-drawer-merge-button"]')
+      || [...drawer.querySelectorAll('button')].find(b => /^merge tickets$/i.test((b.textContent || '').trim()));
+    if (!btn) return null;
+    const idOf = t => { const m = (t.textContent || '').match(/#(\d{3,})/); return m ? m[1] : null; };
+    // Destination = the ticket chip inside the "Destination ticket" section.
+    let destId = null;
+    container.querySelectorAll('h2').forEach(h2 => {
+      if (!/destination/i.test(h2.textContent || '')) return;
+      const tag = h2.parentElement && h2.parentElement.querySelector('[data-garden-id="tags.tag_view"]');
+      if (tag) { const id = idOf(tag); if (id) destId = id; }
+    });
+    // Sources = EVERY ticket chip in the review that isn't the destination — covers
+    // multi-source merges whether Zendesk renders one "Source ticket" block per
+    // source or several chips together. Only tag chips are read (not the comment
+    // body, which may also mention #ids), so it stays accurate.
+    const allIds = [...container.querySelectorAll('[data-garden-id="tags.tag_view"]')]
+      .map(idOf).filter(Boolean);
+    const sourceIds = [...new Set(allIds.filter(id => id !== destId))];
+    if (!destId || !sourceIds.length) return null;
+    return { btn, destId, sourceIds, stage: 'review' };
   }
 
   let _mergeSig = '';
   let _mergeBlocked = false;
+  // Merge-log dedup: suppress re-logging the same destination+source set within
+  // this window (kills drawer reopen/re-render noise; a later re-attempt re-logs).
+  const _mergeLogged = new Map();         // "destId=>srcIds" -> last-logged ts
+  // Short window: collapses only the instant drawer reopen/re-render flicker
+  // (sub-second to a few seconds). A real re-attempt ~20–30s+ later still logs.
+  const MERGE_LOG_WINDOW_MS = 10 * 1000;
   async function checkMerge() {
     // Off if the extension is disabled, in log-only mode, or the merge guard is
     // turned off (globally or for THIS agent via a per-agent override: scan_merge).
     if (config.enabled === false || config.enforcement === 'log' || config.scan_merge === false) { clearMergeBlock(); return; }
-    const info = readMergeDrawer();
+    // Step 2 (review) takes priority when present — it's the last line of defence
+    // before the final confirm; otherwise evaluate Step 1 (source list + destination).
+    const info = readMergeReview() || readMergeDrawer();
     if (!info) { _mergeSig = ''; clearMergeBlock(); return; }
-    const sig = info.destId + '|' + info.sourceIds.join(',');
+    const sig = (info.stage || 'step1') + '|' + info.destId + '|' + info.sourceIds.join(',');
     if (sig === _mergeSig) return;            // already evaluated this exact set
     _mergeSig = sig;
     const [destOrg, ...srcOrgs] = await Promise.all(
@@ -713,44 +888,67 @@
     info.sourceIds.forEach((id, i) => {
       if (srcOrgs[i] && destOrg && srcOrgs[i].toLowerCase() !== destOrg.toLowerCase()) bad.push({ id, org: srcOrgs[i] });
     });
-    const fresh = readMergeDrawer();
+    const fresh = readMergeReview() || readMergeDrawer();
     if (!fresh) return;
     if (bad.length) {
-      applyMergeBlock(fresh, destOrg, bad);
-      // Telemetry: log the merge flag once per unique set (shows in the dashboard).
-      try {
-        chrome.runtime.sendMessage({
-          action: 'logDetection', kind: 'merge',
-          ticketId: info.destId, ticketOrg: destOrg,
-          detectedTerm: bad.map(b => `#${b.id} ${b.org}`).join(', '),
-          associatedClient: destOrg
-        }).catch(() => {});
-      } catch (_) {}
+      applyMergeBlock(fresh.btn, destOrg, bad);
+      // Telemetry — but DON'T re-log the same cross-client set on every drawer
+      // reopen/re-render. Dedup within a short window keyed by destination +
+      // the blocked source set: instant render/reopen flicker collapses to one
+      // row, while a genuine re-attempt (~20–30s+ later) still logs a fresh row.
+      const logKey = info.destId + '=>' + bad.map(b => b.id).sort().join(',');
+      const now = Date.now();
+      const prev = _mergeLogged.get(logKey);
+      if (!prev || now - prev > MERGE_LOG_WINDOW_MS) {
+        _mergeLogged.set(logKey, now);
+        try {
+          chrome.runtime.sendMessage({
+            action: 'logDetection', kind: 'merge',
+            ticketId: info.destId, ticketOrg: destOrg,
+            detectedTerm: bad.map(b => `#${b.id} ${b.org}`).join(', '),
+            associatedClient: destOrg
+          }).catch(() => {});
+        } catch (_) {}
+      }
     } else clearMergeBlock(fresh);
   }
 
-  function applyMergeBlock(info, destOrg, bad) {
+  function applyMergeBlock(btn, destOrg, bad) {
     const doBlock = config.enforcement !== 'warn';
     _mergeBlocked = doBlock;
-    const { nextBtn } = info;
-    if (doBlock) { nextBtn.setAttribute('aria-disabled', 'true'); nextBtn.style.opacity = '0.5'; nextBtn.style.cursor = 'not-allowed'; }
+    if (doBlock && btn) { btn.setAttribute('aria-disabled', 'true'); btn.style.opacity = '0.5'; btn.style.cursor = 'not-allowed'; btn.dataset.csMergeBlocked = '1'; }
+    // Anchor the warning: at the top of the review panel on step 2, else before the
+    // step-1 Next button.
+    const review = document.querySelector('[data-test-id="merge-drawer-review-merge"]');
     let w = document.querySelector('#cs-merge-warning');
-    if (!w) { w = document.createElement('div'); w.id = 'cs-merge-warning'; nextBtn.parentElement && nextBtn.parentElement.insertBefore(w, nextBtn); }
+    if (!w) {
+      w = document.createElement('div'); w.id = 'cs-merge-warning';
+      if (review) review.insertBefore(w, review.firstChild);
+      else if (btn && btn.parentElement) btn.parentElement.insertBefore(w, btn);
+      else (document.querySelector('[data-test-id="merge-drawer"]') || document.body).appendChild(w);
+    }
     const list = bad.map(b => `#${esc(b.id)} (${esc(b.org)})`).join(', ');
     w.style.cssText = 'margin:10px 0;padding:10px 12px;border-radius:8px;background:#fef2f2;border:1px solid #fecaca;color:#991b1b;font:12.5px/1.45 -apple-system,BlinkMacSystemFont,Segoe UI,Roboto,sans-serif';
-    w.innerHTML = `⚠️ <b>Wrong-client merge ${doBlock ? 'blocked' : 'warning'}.</b> Destination is <b>${esc(destOrg)}</b>, but ${bad.length > 1 ? 'these source tickets belong' : 'this source ticket belongs'} to a different client: ${list}. ${doBlock ? 'Pick a same-client destination to continue.' : 'Double-check before merging.'}`;
+    const fix = doBlock
+      ? (review ? 'Go Back and choose a same-client destination.' : 'Pick a same-client destination to continue.')
+      : 'Double-check before merging.';
+    w.innerHTML = `⚠️ <b>Wrong-client merge ${doBlock ? 'blocked' : 'warning'}.</b> Destination is <b>${esc(destOrg)}</b>, but ${bad.length > 1 ? 'these source tickets belong' : 'this source ticket belongs'} to a different client: ${list}. ${fix}`;
   }
 
-  function clearMergeBlock(info) {
+  function clearMergeBlock() {
     _mergeBlocked = false;
-    const btn = (info && info.nextBtn) || document.querySelector('[data-test-id="merge-drawer-next-button"]');
-    if (btn) { btn.removeAttribute('aria-disabled'); btn.style.opacity = ''; btn.style.cursor = ''; }
+    document.querySelectorAll('[data-cs-merge-blocked="1"]').forEach(b => {
+      b.removeAttribute('aria-disabled'); b.style.opacity = ''; b.style.cursor = ''; delete b.dataset.csMergeBlocked;
+    });
     const w = document.querySelector('#cs-merge-warning'); if (w) w.remove();
   }
 
-  // Hard block: intercept the Next click in the capture phase while blocked.
+  // Hard block: intercept the Next (step 1) AND the final Merge (step 2) clicks in
+  // the capture phase while blocked.
   document.addEventListener('click', e => {
-    if (_mergeBlocked && e.target.closest && e.target.closest('[data-test-id="merge-drawer-next-button"]')) {
+    if (!_mergeBlocked || !e.target.closest) return;
+    if (e.target.closest('[data-test-id="merge-drawer-next-button"]')
+     || e.target.closest('[data-test-id="merge-drawer-merge-button"]')) {
       e.preventDefault(); e.stopImmediatePropagation();
     }
   }, true);
@@ -906,6 +1104,115 @@
     if (config.solve_guard_mode !== 'warn') setStatusPending();
   }, true);
 
+  // ─── CC cross-domain guard ───────────────────────────────────────────────────
+  // On a PUBLIC reply, block the send when a CC recipient's email domain differs
+  // from the ticket requester's (client's) domain — the wrong-merge leak where
+  // another client is left on the mail chain. Internal notes are never touched
+  // (they don't email CCs). Recipients are read from the Zendesk API (requester +
+  // collaborators + email CCs), which is markup-independent and reflects the CCs a
+  // merge persists.
+  let _ccBlocked = false;
+  let _ccBad = [];
+  const _ccCache  = new Map();   // ticketId -> { ts, anchor, cc:[emails] }
+  const _ccLogged = new Set();
+
+  function ccAllowDomains() {
+    return new Set(String(config.cc_guard_allow_domains || '')
+      .split(/[\n,;\s]+/).map(s => s.trim().toLowerCase()).filter(Boolean));
+  }
+  function ccRestrictedSet() {
+    const raw = config.cc_guard_restrict_orgs;
+    if (!raw || !String(raw).trim()) return null;   // null => all clients
+    return new Set(String(raw).split(/[\n,]/).map(s => s.trim().toLowerCase()).filter(Boolean));
+  }
+  function isPublicReply() {
+    const sw = document.querySelector('[data-test-id="omnichannel-channel-switcher-button"]');
+    const t = (sw?.textContent || '').toLowerCase();
+    if (!t) return false;                  // composer not open / unknown → don't guard
+    return !/internal\s*note/.test(t);     // anything that isn't an internal note emails CCs
+  }
+  const domainOf = e => (String(e).split('@')[1] || '').trim().toLowerCase();
+
+  async function ccRecipients(id) {
+    const hit = _ccCache.get(id);
+    if (hit && Date.now() - hit.ts < 8000) return hit;
+    try {
+      const t = await fetch(`/api/v2/tickets/${id}.json`, { headers: { Accept: 'application/json' } });
+      if (!t.ok) return null;
+      const tk = (await t.json()).ticket || {};
+      const ccIds = [...new Set([...(tk.collaborator_ids || []), ...(tk.email_cc_ids || [])])].filter(Boolean);
+      const need = [tk.requester_id, ...ccIds].filter(Boolean);
+      const emails = {};
+      if (need.length) {
+        const u = await fetch(`/api/v2/users/show_many.json?ids=${need.join(',')}`, { headers: { Accept: 'application/json' } });
+        if (u.ok) ((await u.json()).users || []).forEach(x => { emails[x.id] = x.email; });
+      }
+      const rec = { ts: Date.now(), anchor: domainOf(emails[tk.requester_id] || ''), cc: ccIds.map(i => emails[i]).filter(Boolean) };
+      _ccCache.set(id, rec);
+      return rec;
+    } catch (_) { return null; }
+  }
+
+  async function checkCcGuard() {
+    if (config.enabled === false || config.cc_guard !== true) { clearCcGuard(); return; }
+    if (!/\/tickets\/\d+/.test(location.href)) { clearCcGuard(); return; }   // saved tickets only
+    if (!isPublicReply()) { clearCcGuard(); return; }                        // never guard internal notes
+    const org = getOrg();
+    const restrict = ccRestrictedSet();
+    if (restrict && (!org || !restrict.has(org.toLowerCase()))) { clearCcGuard(); return; }
+    const id = getActiveTicket();
+    if (!id) { clearCcGuard(); return; }
+    const rec = await ccRecipients(id);
+    if (!rec || !rec.anchor) { clearCcGuard(); return; }
+    const allow = ccAllowDomains();
+    const bad = rec.cc.filter(e => { const d = domainOf(e); return d && d !== rec.anchor && !allow.has(d); });
+    if (bad.length) applyCcGuard(org, rec.anchor, bad);
+    else clearCcGuard();
+  }
+
+  function applyCcGuard(org, anchor, bad) {
+    const enforce = config.cc_guard_mode !== 'warn';
+    _ccBlocked = enforce;
+    _ccBad = bad;
+    const btn = document.querySelector('[data-test-id="submit_button-button"]');
+    if (enforce && btn) { btn.setAttribute('aria-disabled', 'true'); btn.style.opacity = '0.5'; btn.style.cursor = 'not-allowed'; btn.dataset.csCcBlocked = '1'; }
+    let w = document.querySelector('#cs-cc-warning');
+    if (!w) {
+      const composer = document.querySelector('[data-test-id="omnichannel-composer"]') || document.querySelector('[data-test-id="ticket-footer"]') || document.body;
+      w = document.createElement('div'); w.id = 'cs-cc-warning';
+      composer.parentElement ? composer.parentElement.insertBefore(w, composer) : composer.insertBefore(w, composer.firstChild);
+    }
+    w.style.cssText = 'margin:8px 12px;padding:10px 12px;border-radius:8px;background:#fef2f2;border:1px solid #fecaca;color:#991b1b;font:12.5px/1.45 -apple-system,BlinkMacSystemFont,Segoe UI,Roboto,sans-serif';
+    const list = bad.map(e => esc(e)).join(', ');
+    w.innerHTML = `⚠️ <b>Wrong-recipient ${enforce ? 'blocked' : 'warning'}.</b> This ticket's client is <b>@${esc(anchor)}</b>, but the CC chain includes a different domain: <b>${list}</b>. ${enforce ? 'Remove that recipient before sending a public reply.' : 'Double-check before replying — this may leak data to the wrong client.'}`;
+    const sig = (getActiveTicket() || '') + '|' + bad.slice().sort().join(',');
+    if (!_ccLogged.has(sig)) {
+      _ccLogged.add(sig);
+      try {
+        chrome.runtime.sendMessage({
+          action: 'logDetection', kind: 'cc_leak',
+          ticketId: getActiveTicket(), ticketOrg: org,
+          detectedTerm: bad.join(', '), associatedClient: org
+        }).catch(() => {});
+      } catch (_) {}
+    }
+  }
+
+  function clearCcGuard() {
+    _ccBlocked = false; _ccBad = [];
+    document.querySelectorAll('[data-cs-cc-blocked="1"]').forEach(b => { b.removeAttribute('aria-disabled'); b.style.opacity = ''; b.style.cursor = ''; delete b.dataset.csCcBlocked; });
+    const w = document.querySelector('#cs-cc-warning'); if (w) w.remove();
+  }
+
+  // Capture-phase backstop: block the public-reply send while a cross-domain CC is present.
+  document.addEventListener('click', e => {
+    if (!_ccBlocked || !e.target.closest) return;
+    if (e.target.closest('[data-test-id="submit_button-button"]')) {
+      e.preventDefault(); e.stopImmediatePropagation();
+      try { alert(`Wrong recipient on the CC chain: ${_ccBad.join(', ')}.\nRemove it before sending a public reply — it belongs to a different client than this ticket.`); } catch (_) {}
+    }
+  }, true);
+
   let lastTicketId = getActiveTicket();
 
   // Stop polling if the extension is reloaded while the tab is still open
@@ -914,6 +1221,7 @@
     handleTicketSwitch();
     checkMerge();
     checkSolveGuard();
+    checkCcGuard();
   }, 500);
 
 })();
